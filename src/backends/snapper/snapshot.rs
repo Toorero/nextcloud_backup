@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    hash::Hash,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -29,6 +30,13 @@ pub struct Snapshot {
 impl PartialEq for Snapshot {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
+    }
+}
+impl Eq for Snapshot {}
+
+impl Hash for Snapshot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
     }
 }
 
@@ -197,7 +205,7 @@ impl Snapshot {
         let mut btrfs_send = btrfs_send
             .arg(snapshot_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped()) // FIXME: discard if not tracing
             .spawn()
             .map_err(SyncSnapshotError::BtrfSendFailed)?;
         log::trace!(target: "backend::snapper::snapshot", "started btrfs-send: {:?}", self);
@@ -231,7 +239,7 @@ impl Snapshot {
         let mut btrfs_recv = btrfs_recv
             .arg(sync_destination)
             .stdin(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped()) // FIXME: discard if not tracing
             .spawn()
             .map_err(SyncSnapshotError::BtrfRecvFailed)?;
         log::trace!(target: "backend::snapper::snapshot", "started btrfs-receive: {:?}", self);

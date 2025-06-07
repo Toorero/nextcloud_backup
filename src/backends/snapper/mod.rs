@@ -1,9 +1,14 @@
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::{io, path::PathBuf};
 
 use clap::ValueEnum;
 use derive_more::{Display, Error};
+use log::Level;
 
+use crate::backends::snapper::snapshot::Snapshot;
 use crate::backends::Backup;
 use config::SnapperConfig;
 
@@ -72,8 +77,6 @@ impl Backup for Snapper {
             format!("{}", data_dir.display()),
         ))?;
 
-        // TODO: sync deletion
-
         // mark snapshot not synced
         let _ = cfg.create_snapshot(self.cleanup_algorithm);
 
@@ -81,6 +84,83 @@ impl Backup for Snapper {
             log::warn!(target: "backend::snapper", "Not syncing snapshots to other destination");
             return Ok(());
         };
+
+        // delete subvolumes at sync destination that are not present at source
+        match sync_destination.read_dir() {
+            Ok(synced) => {
+                log::debug!(target: "backend::snapper", "Synchronize deletion to sync destination");
+
+                let present_snapshots: HashSet<_> =
+                    cfg.snapshots().iter().map(Snapshot::id).collect();
+                log::trace!(target: "backend::snapper", "Snapshots present: {:?}", present_snapshots);
+
+                let subv_deletions = synced.filter_map(|entry| {
+                    let Ok(path) = entry.map(|entry| entry.path()) else {
+                        return None;
+                    };
+
+                    // check if directory is a snapshot dir
+                    if !path.is_dir() {
+                        return None;
+                    }
+                    // delete empty dirs
+                    if std::fs::remove_dir(&path).is_ok() {
+                        log::trace!(target: "backend::snapper", "Deleted empty direcotry at sync destination: {}", path.display());
+                        return None;
+                    }
+                    if !path.join("snapshot/").is_dir() {
+                        return None;
+                    }
+                    let Some(Ok(snapshot_id)): Option<Result<u64, _>> =
+                        path.file_name().and_then(OsStr::to_str).map(str::parse)
+                    else {
+                        return None;
+                    };
+                    log::trace!(target: "backend::snapper", "Found snapshot present at sync destination: {}", snapshot_id);
+
+                    // don't delete present snapshots!
+                    if present_snapshots.contains(&snapshot_id) {
+                        return None;
+                    }
+
+                    log::debug!(target: "backend::snapper", "Sync deletion of snapshot to sync destination: {}", snapshot_id);
+                    let mut btrfs_subv_del = Command::new("sudo");
+                    btrfs_subv_del.arg("btrfs");
+                    // enable verbose btrfs-receive output
+                    if log::log_enabled!(target: "backend::snapper", Level::Trace) {
+                        btrfs_subv_del.arg("-v");
+                    }
+                    btrfs_subv_del.arg("subvolume").arg("delete");
+
+                    let btrfs_subv_del = btrfs_subv_del
+                        .arg(path.join("snapshot/"))
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
+                    
+                    if let Err(ref e) = btrfs_subv_del {
+                        log::error!(target: "backend::snapper", "Deletion of snapshot {} at sync destination failed: {}", snapshot_id, e);
+                    }
+                    btrfs_subv_del.ok().map(|c| (c, snapshot_id))
+                });
+
+                // wait for completion of all deletions
+                for (mut deletion, snapshot_id) in subv_deletions {
+                    match deletion.wait() {
+                        Ok(status) if status.success() => {
+                             log::trace!(target: "backend::snapper", "Finished deletion of snapshot at sync destination: {}", snapshot_id);
+                        }
+                        Ok(status) => {
+                             log::error!(target: "backend::snapper", "Deletion of snapshot {} at sync destination failed: {}", snapshot_id, status);
+                        }
+                        Err(e) => log::error!(target: "backend::snapper", "Couldn't run deletion of snapshot {} at sync destination: {}", snapshot_id, e),
+                    }
+                }
+            }
+            Err(e) => {
+                log::debug!(target: "backend::snapper", "Reading sync destination failed: {}", e);
+            }
+        }
 
         let mut orig_anchor = cfg.anchored_snapshot();
         let mut anchor = orig_anchor.clone();
