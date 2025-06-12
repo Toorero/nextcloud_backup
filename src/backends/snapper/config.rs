@@ -165,9 +165,9 @@ impl SnapperConfig {
             self.snapshots()
                 .into_iter()
                 .filter(Snapshot::is_anchored)
-                .collect::<Vec<_>>()
-                .len(),
-            1,
+                .skip(1)
+                .next(),
+            None,
             "there should only be one anchor"
         );
 
