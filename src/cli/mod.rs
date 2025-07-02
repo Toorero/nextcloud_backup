@@ -74,6 +74,11 @@ pub struct SnapperArgs {
     /// Algorithm to later clean up created snapshots.
     #[arg(long = "cleanup-algorithm", short = 'c', default_value = "timeline")]
     pub cleanup: MaybeSnapperCleanupAlgorithm,
+
+    /// Sync every snapshot in full even if incrementally sending the snapshot
+    /// would be possible.
+    #[arg(long = "no-incrementally")]
+    pub no_incrementally: bool,
 }
 
 // HACK: Clap has "issues" with utilizing a ValueParser for Option<SnapperCleanupAlgorithm>...

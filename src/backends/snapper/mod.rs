@@ -37,8 +37,7 @@ pub struct Snapper {
 
     /// Snapshots created by [Snapper] can be send to a different location
     /// to have the data stored at multiple locations.
-    /// This backend utilizes [`btrfs-send(8)`] and [`btrfs-receive(8)`]
-    /// to send snapshots incrementally.
+    /// This backend utilizes [`btrfs-send(8)`] and [`btrfs-receive(8)`].
     ///
     /// <div class="warning">
     /// The deletion of snapshots is synced to the destination as well.
@@ -50,6 +49,13 @@ pub struct Snapper {
     /// [`btrfs-send(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-send.8.en
     /// [`btrfs-receive(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-receive.8.en
     pub sync_destination: Option<PathBuf>,
+
+    /// If set snapshots are send incrementally using [`btrfs-send(8)`] and [`btrfs-receive(8)`].
+    /// Otherwise all snapshots are synced in full utilizing the same method.
+    ///
+    /// [`btrfs-send(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-send.8.en
+    /// [`btrfs-receive(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-receive.8.en
+    pub incrementally: bool,
 }
 
 impl Snapper {}
@@ -183,7 +189,11 @@ impl Backup for Snapper {
 
             if let Some(ref mut anchor) = anchor {
                 // sync snapshot incrementally using our anchor snapshot
-                snap.sync_incrementally(anchor, &sync_destination).unwrap();
+                if self.incrementally {
+                    snap.sync_incrementally(anchor, &sync_destination).unwrap();
+                } else {
+                    snap.sync(&sync_destination).unwrap();
+                }
 
                 // update anchor to newly synced snapshot
                 *anchor = snap;

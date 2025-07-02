@@ -34,6 +34,7 @@ fn main() {
         let mut backend_snapper: Snapper = Snapper {
             cleanup_algorithm: cli.snapper_args.cleanup.into(),
             sync_destination: cli.snapper_args.sync_destination,
+            incrementally: !cli.snapper_args.no_incrementally,
         };
         let snapper = thread::spawn(move || backend_snapper.backup(&nextcloud, dry_run));
         Some(snapper)
