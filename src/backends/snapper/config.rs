@@ -21,6 +21,10 @@ impl PartialEq for SnapperConfig {
 
 impl SnapperConfig {
     pub fn by_dir(dir: &Path) -> Option<SnapperConfig> {
+        log::trace!(
+            target: "backends::snapper::config",
+            "Running: snapper --jsonout list-configs"
+        );
         let snapper_output = Command::new("snapper")
             .arg("--jsonout")
             .arg("list-configs")
@@ -57,6 +61,11 @@ impl SnapperConfig {
     }
 
     pub fn config_by_id(config_id: &str) -> Option<SnapperConfig> {
+        log::trace!(
+            target: "backends::snapper::config",
+            "Running: snapper --jsonout -c {} get-config",
+            config_id
+        );
         let snapper_output = Command::new("snapper")
             .arg("--jsonout")
             .arg("-c")
@@ -90,6 +99,11 @@ impl SnapperConfig {
 
 impl SnapperConfig {
     pub fn snapshots(&self) -> Vec<Snapshot> {
+        log::trace!(
+            target: "backends::snapper::config",
+            "Running: snapper --jsonout -c {} list --columns number,userdata,cleanup,date",
+            self.config_id
+        );
         let snapper_output = Command::new("snapper")
             .arg("--jsonout")
             .arg("-c")
@@ -175,7 +189,7 @@ impl SnapperConfig {
     }
 
     pub fn create_snapshot(&self, cleanup: Option<SnapperCleanupAlgorithm>) -> Snapshot {
-        log::debug!(target: "backends::snapper::config", "Create snapshot: {}", self.config_id);
+        log::info!(target: "backends::snapper::config", "Create snapshot: {}", self.config_id);
 
         let mut snapper_command = Command::new("snapper");
         snapper_command
@@ -191,6 +205,18 @@ impl SnapperConfig {
         if let Some(algorithm) = cleanup {
             snapper_command.arg("-c");
             snapper_command.arg(algorithm.to_string());
+
+            log::trace!(
+                target: "backends::snapper::config",
+                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup' -c {}",
+                self.config_id, algorithm.to_string()
+            );
+        } else {
+            log::trace!(
+                target: "backends::snapper::config",
+                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup'",
+                self.config_id,
+            );
         }
 
         let snapper_output = snapper_command
@@ -209,7 +235,7 @@ impl SnapperConfig {
             .trim()
             .parse()
             .expect("snapper should output valid snapshot id");
-        log::trace!(target: "backends::snapper::config", "Created snapshot: {}", id);
+        log::debug!(target: "backends::snapper::config", "Created snapshot: {}", id);
 
         self.snapshot(id)
             .expect("just created snapshot should exist")

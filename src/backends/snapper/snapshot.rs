@@ -103,6 +103,12 @@ impl Snapshot {
             .join(",");
         let cleanup = self.cleanup.map(|c| c.to_string()).unwrap_or_default();
 
+        log::trace!(
+            target: "backend::snapper::snapshot",
+            "Running: snapper --jsonout -c {} modify -u {user_data} -c {cleanup} {}",
+            self.config.config_id,
+            self.id
+        );
         let snapper_output = Command::new("snapper")
             .arg("--jsonout")
             .arg("-c")
@@ -116,7 +122,7 @@ impl Snapshot {
             .output()
             .expect("Failed to execute snapper command");
 
-        log::trace!(target: "backend::snapper::snapshot", "Updated snapshot meta data: {:?}", self);
+        log::debug!(target: "backend::snapper::snapshot", "Updated snapshot meta data: {:?}", self);
         assert!(snapper_output.status.success());
     }
 
@@ -154,7 +160,7 @@ impl Snapshot {
 
         self.sync_maybe_incrementally(None, sync_destination)?;
 
-        log::trace!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
+        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
         Ok(())
     }
 
@@ -163,11 +169,11 @@ impl Snapshot {
         anchor: &Snapshot,
         sync_destination: &Path,
     ) -> Result<(), SyncSnapshotError> {
-        log::debug!(target: "backend::snapper:snapshot", "Syncing snapshot incrementally: {:?} ({:?}) -> {}", self, anchor, sync_destination.display());
+        log::info!(target: "backend::snapper:snapshot", "Syncing snapshot incrementally: {:?} ({:?}) -> {}", self, anchor, sync_destination.display());
 
         self.sync_maybe_incrementally(Some(anchor), sync_destination)?;
 
-        log::trace!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
+        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
 
         Ok(())
     }
@@ -185,13 +191,16 @@ impl Snapshot {
         // WARNING: Sending/Receiving snapshots sadly requires root permissions/sudo
         //          add the following (or similar line) into your sudoers:
         //          `www-data ALL=(ALL:ALL) NOPASSWD: /usr/bin/btrfs`
+        let mut btrfs_send_str = "sudo btrfs".to_string();
         let mut btrfs_send = Command::new("sudo");
         btrfs_send.arg("btrfs");
         // enable verbose btrfs-send output
         if log::log_enabled!(target: "backend::snapper::snapshot::btrfs-send", Level::Trace) {
             btrfs_send.arg("-v");
+            btrfs_send_str += " -v";
         }
         btrfs_send.arg("send");
+        btrfs_send_str += " send";
 
         // BTRFS-SEND
         // add parent snapshot argument if sending incrementally
@@ -200,8 +209,14 @@ impl Snapshot {
             assert!(anchor_path.is_dir(), "path of anchor snapshot must exist");
             assert!(anchor.is_synced(), "anchor should have been synced already");
 
+            btrfs_send_str.push_str(format!(" -p {}", anchor_path.display()).as_str());
             btrfs_send.arg("-p").arg(anchor_path);
         }
+        log::trace!(
+            target: "backend::snapper::snapshot",
+            "Running: {btrfs_send_str} {}",
+            snapshot_path.display(),
+        );
         let mut btrfs_send = btrfs_send
             .arg(snapshot_path)
             .stdout(Stdio::piped())
@@ -233,6 +248,17 @@ impl Snapshot {
         // enable verbose btrfs-receive output
         if log::log_enabled!(target: "backend::snapper::snapshot::btrfs-receive", Level::Trace) {
             btrfs_recv.arg("-v");
+            log::trace!(
+                target: "backend::snapper::snapshot",
+                "Running: sudo btrfs receive -v {}",
+                sync_destination.display(),
+            );
+        } else {
+            log::trace!(
+                target: "backend::snapper::snapshot",
+                "Running: sudo btrfs receive {}",
+                sync_destination.display(),
+            );
         }
         btrfs_recv.arg("receive");
 
@@ -287,7 +313,7 @@ impl Snapshot {
                 let btrf_send_failed = SyncSnapshotError::BtrfSendFailed(err);
                 return Err(btrf_send_failed);
             }
-            log::trace!(target: "backend::snapper::snapshot", "btrf-send complete: {:?}", self);
+            log::trace!(target: "backend::snapper::snapshot", "btrfs-send complete: {:?}", self);
         }
 
         assert!(btrfs_recv_log
@@ -305,7 +331,7 @@ impl Snapshot {
                 let btrf_recv_failed = SyncSnapshotError::BtrfRecvFailed(err);
                 return Err(btrf_recv_failed);
             }
-            log::trace!(target: "backend::snapper::snapshot", "btrf-receive complete: {:?}", self);
+            log::trace!(target: "backend::snapper::snapshot", "btrfs-receive complete: {:?}", self);
         }
 
         self.synced();

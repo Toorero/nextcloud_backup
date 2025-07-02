@@ -1,6 +1,6 @@
 use std::{path::PathBuf, str::FromStr};
 
-use clap::{builder::ValueParser, ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use log::LevelFilter;
 
 use crate::backends::snapper::{SnapperCleanupAlgorithm, UnkownCleanupAlgorithm};

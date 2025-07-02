@@ -129,6 +129,12 @@ impl Backup for Snapper {
                     // enable verbose btrfs-receive output
                     if log::log_enabled!(target: "backend::snapper", Level::Trace) {
                         btrfs_subv_del.arg("-v");
+
+                        log::trace!(
+                            target: "backend::snapper",
+                            "Running: sudo btrfs -v subvolume delete {}",
+                            path.join("snapshot/").display()
+                        );
                     }
                     btrfs_subv_del.arg("subvolume").arg("delete");
 

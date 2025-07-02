@@ -26,6 +26,13 @@ impl Occ {
 
 impl Occ {
     fn execute_command(&self, command: &str, args: &[&str]) -> String {
+        log::trace!(
+            target: "nextcloud::occ",
+            "Running: php {} --no-warnings {} {}",
+            self.occ.as_path().display(),
+            command,
+            args.join(" ")
+        );
         let occ_output = Command::new("php")
             .arg(self.occ.as_path())
             .arg("--no-warnings") //suppress maintenance mode is enabled warning

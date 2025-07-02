@@ -44,12 +44,16 @@ impl Backup for MariaDBBackend {
         let table_name = nextcloud.occ.db_name();
         let table_usr = nextcloud.occ.db_user();
         log::info!(target: "backend::mariadb", "Create database dump of the Nextcloud table: {}", table_name);
-        log::trace!(target: "backend::mariadb", "Using dbuser '{}' for backup", table_usr);
+        log::debug!(target: "backend::mariadb", "Using dbuser '{}' for backup", table_usr);
 
         fs::create_dir_all(&self.db_dump_dest)?;
         let db_dump_file = self.generate_db_dump_filename();
         log::debug!(target: "backend::mariadb", "Save Nextcloud database dump at: {}", db_dump_file.display());
 
+        log::trace!(
+            target: "backend::mariadb",
+            "Running: mariadb-dump --opt --single-transaction --user={table_usr} {table_name}"
+        );
         let mut dump_process = Command::new("mariadb-dump")
             .arg("--opt") // sensible dump defaults
             .arg("--single-transaction")
