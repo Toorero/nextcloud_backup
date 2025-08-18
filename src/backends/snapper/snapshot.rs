@@ -18,6 +18,7 @@ const ANCHOR_ID: &str = "anchor";
 /// Snapper userdata key to identify already synched snapshots.
 pub(super) const SYNCED_ID: &str = "synced";
 
+/// A snapshot created by snapper.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     config: SnapperConfig,
@@ -60,6 +61,7 @@ impl Snapshot {
 
 // read snapshot data
 impl Snapshot {
+    /// Returns a list of the user data saved in the [Snapshot].
     pub fn user_data(&self) -> &HashMap<String, String> {
         &self.user_data
     }
@@ -80,13 +82,15 @@ impl Snapshot {
         self.id
     }
 
+    /// Creation date of the snapshot.
     pub fn date(&self) -> &NaiveDateTime {
         &self.date
     }
 
+    /// Path to the snapshot.
     fn snapshot_path(&self) -> PathBuf {
         self.config
-            .subvolume
+            .subvolume()
             .join(format!(".snapshots/{}/snapshot", self.id))
     }
 }
@@ -106,7 +110,7 @@ impl Snapshot {
         log::trace!(
             target: "backend::snapper::snapshot",
             "Running: snapper --jsonout -c {} modify -u {user_data} -c {cleanup} {}",
-            self.config.config_id,
+            self.config.config_id(),
             self.id
         );
         let snapper_output = Command::new("snapper")
@@ -122,10 +126,11 @@ impl Snapshot {
             .output()
             .expect("Failed to execute snapper command");
 
-        log::debug!(target: "backend::snapper::snapshot", "Updated snapshot meta data: {:?}", self);
+        log::debug!(target: "backend::snapper::snapshot", "Updated snapshot meta data: {self:?}");
         assert!(snapper_output.status.success());
     }
 
+    /// Set the cleanup algorithm.
     pub fn set_cleanup(&mut self, cleanup_algorithm: Option<SnapperCleanupAlgorithm>) {
         self.cleanup = cleanup_algorithm;
         self.update();
@@ -155,15 +160,22 @@ impl Snapshot {
 
 // sync methods
 impl Snapshot {
+    /// Sync snapshots in full to the `sync_destination`.
+    ///
+    /// If you already have a parent snapshot synced to the destination
+    /// you can also only sync the differences using [Snapshot::sync_incrementally].
     pub fn sync(&mut self, sync_destination: &Path) -> Result<(), SyncSnapshotError> {
-        log::info!(target: "backend::snapper", "Syncing snapshot in full: {:?}", self);
+        log::info!(target: "backend::snapper", "Syncing snapshot in full: {self:?}");
 
         self.sync_maybe_incrementally(None, sync_destination)?;
 
-        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
+        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {self:?}");
         Ok(())
     }
 
+    /// Sync the snapshot incrementally to `sync_destination`.
+    ///
+    /// The `anchor` snapshot is required to be already synced.
     pub fn sync_incrementally(
         &mut self,
         anchor: &Snapshot,
@@ -173,7 +185,7 @@ impl Snapshot {
 
         self.sync_maybe_incrementally(Some(anchor), sync_destination)?;
 
-        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {:?}", self);
+        log::debug!(target: "backend::snapper", "Syncing of snapshot completed: {self:?}");
 
         Ok(())
     }
@@ -185,7 +197,11 @@ impl Snapshot {
     ) -> Result<(), SyncSnapshotError> {
         let snapshot_path = self.snapshot_path();
         assert!(snapshot_path.is_dir(), "snapshot must exist");
-        assert!(sync_destination.exists(), "sync destination must exist");
+        if !sync_destination.exists() {
+            return Err(SyncSnapshotError::DestinationNotFound(
+                sync_destination.into(),
+            ));
+        }
 
         // TODO: support compressed sending?
         // WARNING: Sending/Receiving snapshots sadly requires root permissions/sudo
@@ -207,7 +223,9 @@ impl Snapshot {
         if let Some(anchor) = anchor {
             let anchor_path = anchor.snapshot_path();
             assert!(anchor_path.is_dir(), "path of anchor snapshot must exist");
-            assert!(anchor.is_synced(), "anchor should have been synced already");
+            if !anchor.is_synced() {
+                return Err(SyncSnapshotError::AnchorNotSynced(anchor.clone()));
+            }
 
             btrfs_send_str.push_str(format!(" -p {}", anchor_path.display()).as_str());
             btrfs_send.arg("-p").arg(anchor_path);
@@ -223,18 +241,21 @@ impl Snapshot {
             .stderr(Stdio::piped()) // FIXME: discard if not tracing
             .spawn()
             .map_err(SyncSnapshotError::BtrfSendFailed)?;
-        log::trace!(target: "backend::snapper::snapshot", "started btrfs-send: {:?}", self);
+        log::trace!(target: "backend::snapper::snapshot", "started btrfs-send: {self:?}");
 
         // log btrfs send output
         let btrfs_send_log = if log::log_enabled!(target: "backend::snapper::snapshot::btrfs-send", Level::Trace)
         {
-            let stderr = btrfs_send.stderr.take().unwrap();
+            let stderr = btrfs_send
+                .stderr
+                .take()
+                .expect("stderr of btrfs-send should be untaken");
             Some(thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
 
                 while let Some(Ok(line)) = lines.next() {
-                    log::trace!(target: "backend::snapper::snapshot::btrfs-send", "{}", line);
+                    log::trace!(target: "backend::snapper::snapshot::btrfs-send", "{line}");
                 }
                 log::trace!(target: "backend::snapper::snapshot::btrfs-send", "SEND RELAY COMPLETED");
             }))
@@ -250,14 +271,12 @@ impl Snapshot {
             btrfs_recv.arg("-v");
             log::trace!(
                 target: "backend::snapper::snapshot",
-                "Running: sudo btrfs receive -v {}",
-                sync_destination.display(),
+                "Running: sudo btrfs receive -v {sync_destination:#?}",
             );
         } else {
             log::trace!(
                 target: "backend::snapper::snapshot",
-                "Running: sudo btrfs receive {}",
-                sync_destination.display(),
+                "Running: sudo btrfs receive {sync_destination:#?}",
             );
         }
         btrfs_recv.arg("receive");
@@ -268,18 +287,21 @@ impl Snapshot {
             .stderr(Stdio::piped()) // FIXME: discard if not tracing
             .spawn()
             .map_err(SyncSnapshotError::BtrfRecvFailed)?;
-        log::trace!(target: "backend::snapper::snapshot", "started btrfs-receive: {:?}", self);
+        log::trace!(target: "backend::snapper::snapshot", "started btrfs-receive: {self:?}");
 
         // log btrfs recv output
         let btrfs_recv_log = if log::log_enabled!(target: "backend::snapper::snapshot::btrfs-receive", Level::Trace)
         {
-            let stderr = btrfs_recv.stderr.take().unwrap();
+            let stderr = btrfs_recv
+                .stderr
+                .take()
+                .expect("stderr of btrfs-receive should be untaken");
             Some(thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
 
                 while let Some(Ok(line)) = lines.next() {
-                    log::trace!(target: "backend::snapper::snapshot::btrfs-receive", "{}", line);
+                    log::trace!(target: "backend::snapper::snapshot::btrfs-receive", "{line}");
                 }
                 log::trace!(target: "backend::snapper::snapshot::btrfs-receive", "RECEIVE RELAY COMPLETED");
             }))
@@ -298,40 +320,40 @@ impl Snapshot {
 
         // WAIT for completion
 
-        assert!(btrfs_send_log
-            .map(|handle| handle.join().is_ok())
-            .unwrap_or(true));
+        assert!(
+            btrfs_send_log
+                .map(|handle| handle.join().is_ok())
+                .unwrap_or(true),
+            "couldn't collect log of btrfs-send"
+        );
         {
             let status = btrfs_send
                 .wait()
                 .map_err(SyncSnapshotError::BtrfSendFailed)?;
             if !status.success() {
-                let err = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("btrfs send failed with status {}", status),
-                );
+                let err = io::Error::other(format!("btrfs send failed with status {status}"));
                 let btrf_send_failed = SyncSnapshotError::BtrfSendFailed(err);
                 return Err(btrf_send_failed);
             }
-            log::trace!(target: "backend::snapper::snapshot", "btrfs-send complete: {:?}", self);
+            log::trace!(target: "backend::snapper::snapshot", "btrfs-send complete: {self:?}");
         }
 
-        assert!(btrfs_recv_log
-            .map(|handle| handle.join().is_ok())
-            .unwrap_or(true));
+        assert!(
+            btrfs_recv_log
+                .map(|handle| handle.join().is_ok())
+                .unwrap_or(true),
+            "couldn't collect log of btrfs-receive"
+        );
         {
             let status = btrfs_recv
                 .wait()
                 .map_err(SyncSnapshotError::BtrfRecvFailed)?;
             if !status.success() {
-                let err = io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("btrfs receive failed with status {}", status),
-                );
+                let err = io::Error::other(format!("btrfs receive failed with status {status}"));
                 let btrf_recv_failed = SyncSnapshotError::BtrfRecvFailed(err);
                 return Err(btrf_recv_failed);
             }
-            log::trace!(target: "backend::snapper::snapshot", "btrfs-receive complete: {:?}", self);
+            log::trace!(target: "backend::snapper::snapshot", "btrfs-receive complete: {self:?}");
         }
 
         self.synced();
@@ -341,11 +363,24 @@ impl Snapshot {
 }
 
 #[derive(Debug, Display, Error)]
+/// Errors on syncing a [Snapshot].
 pub enum SyncSnapshotError {
-    #[display("btrfs-send command failed")]
+    /// `btrfs send` failed on syncing.
+    #[display("btrfs-send command failed: {_0}")]
     BtrfSendFailed(io::Error),
-    #[display("btrfs-receive command failed")]
+    #[display("btrfs-receive command failed: {_0}")]
+    /// `btrfs receive` failed on syncing.
     BtrfRecvFailed(io::Error),
-    #[display("pipe failed")]
+    /// Couldn't pipe `btrfs send` into `btrfs receive`.
+    #[display("pipe between btrfs-send and btrfs-receive failed: {_0}")]
     PipeFailed(io::Error),
+    /// Sync destination not found.
+    #[display("Sync destination wasn't found: {_0:#?}")]
+    DestinationNotFound(#[error(ignore)] PathBuf),
+    /// Anchor snapshot wasn't found.
+    ///
+    /// For [incremental syncing](Snapshot::sync_incrementally) it is required
+    /// that the anchor was already synced.
+    #[display("Anchor snapshot isn't synced: {_0:?}")]
+    AnchorNotSynced(#[error(ignore)] Snapshot),
 }

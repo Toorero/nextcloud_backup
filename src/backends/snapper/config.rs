@@ -1,16 +1,19 @@
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::NaiveDateTime;
+use derive_more::{Display, Error};
 use serde_json::Value;
 
 use super::snapshot::{Snapshot, SYNCED_ID};
 use super::SnapperCleanupAlgorithm;
 
 #[derive(Debug, Clone)]
+/// A configuration of snapper.
 pub struct SnapperConfig {
-    pub subvolume: PathBuf,
-    pub config_id: String,
+    pub(super) subvolume: PathBuf,
+    pub(super) config_id: String,
 }
 
 impl PartialEq for SnapperConfig {
@@ -19,33 +22,93 @@ impl PartialEq for SnapperConfig {
     }
 }
 
+#[derive(Debug, Display, Error)]
+/// Error of [SnapperConfig].
+pub enum SnapperConfigError {
+    /// `snapper` command could not be run.
+    ///
+    /// This is usually the case if `snapper` isn't installed locally.
+    #[display("Snapper command couldn't be run: {_0}")]
+    SnapperNotRun(io::Error),
+    /// Snapper command failed.
+    #[display("Snapper command {command:?} failed with error: {error}")]
+    SnapperCommandFailed {
+        /// [Command] that failed.
+        #[error(ignore)]
+        command: Box<Command>,
+        /// Captured stderr.
+        #[error(ignore)]
+        error: String,
+    },
+}
+
+type Result<T> = std::result::Result<T, SnapperConfigError>;
+
 impl SnapperConfig {
-    pub fn by_dir(dir: &Path) -> Option<SnapperConfig> {
+    /// Create a new [SnapperConfig].
+    pub fn new(subvolume: PathBuf, config_id: String) -> Result<Self> {
+        log::trace!(
+            target: "backends::snapper::config",
+            "Running: snapper -c {config_id} create-config {subvolume:#?}"
+        );
+
+        let mut snapper_command = Command::new("snapper");
+        snapper_command
+            .arg("-c")
+            .arg(&config_id)
+            .arg("create-config")
+            .arg(subvolume.as_os_str());
+        let snapper_output = snapper_command
+            .output()
+            .map_err(SnapperConfigError::SnapperNotRun)?;
+        let stderr = String::from_utf8_lossy(&snapper_output.stderr);
+        if !snapper_output.status.success() {
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
+        if !stderr.is_empty() {
+            log::warn!(target: "backend::snapper", "{stderr}" );
+        }
+
+        Ok(SnapperConfig {
+            subvolume,
+            config_id,
+        })
+    }
+
+    /// Find an *existing* snapper config by directory.
+    pub fn by_dir(dir: &Path) -> Result<Option<SnapperConfig>> {
         log::trace!(
             target: "backends::snapper::config",
             "Running: snapper --jsonout list-configs"
         );
-        let snapper_output = Command::new("snapper")
-            .arg("--jsonout")
-            .arg("list-configs")
+        let mut snapper_command = Command::new("snapper");
+        snapper_command.arg("--jsonout").arg("list-configs");
+        let snapper_output = snapper_command
             .output()
-            .expect("Failed to execute snapper command");
-        assert!(snapper_output.status.success(), "snapper command failed");
-
+            .map_err(SnapperConfigError::SnapperNotRun)?;
         let stderr = String::from_utf8_lossy(&snapper_output.stderr);
+        if !snapper_output.status.success() {
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
         if !stderr.is_empty() {
-            log::warn!(target: "backend::snapper", "{}", stderr );
+            log::warn!(target: "backend::snapper", "{stderr}" );
         }
 
-        let jsonout: Value =
-            serde_json::from_slice(&snapper_output.stdout).expect("json should be valid");
+        let jsonout: Value = serde_json::from_slice(&snapper_output.stdout)
+            .expect("snapper json output should be valid");
         let configs = jsonout
             .get("configs")
             .expect("command should return a list of configs")
             .as_array()
             .expect("json list of configs should be an array");
 
-        configs.iter().find_map(|config| {
+        Ok(configs.iter().find_map(|config| {
             let config_id = config.get("config").and_then(Value::as_str)?;
             let subvolume = PathBuf::from(config.get("subvolume").and_then(Value::as_str)?);
 
@@ -57,72 +120,97 @@ impl SnapperConfig {
             } else {
                 None
             }
-        })
+        }))
     }
 
-    pub fn config_by_id(config_id: &str) -> Option<SnapperConfig> {
+    /// Find an *existing* [SnapperConfig] by its config-id.
+    pub fn config_by_id(config_id: &str) -> Result<Option<SnapperConfig>> {
         log::trace!(
             target: "backends::snapper::config",
-            "Running: snapper --jsonout -c {} get-config",
-            config_id
+            "Running: snapper --jsonout -c {config_id} get-config"
         );
-        let snapper_output = Command::new("snapper")
+        let mut snapper_command = Command::new("snapper");
+        snapper_command
             .arg("--jsonout")
             .arg("-c")
             .arg(config_id)
-            .arg("get-config")
+            .arg("get-config");
+        let snapper_output = snapper_command
             .output()
-            .expect("Failed to execute snapper command");
-
+            .map_err(SnapperConfigError::SnapperNotRun)?;
+        let stderr = String::from_utf8_lossy(&snapper_output.stderr);
         if !snapper_output.status.success() {
-            log::warn!(target: "backend::snapper::config", "Snapper configuration unknown: {config_id}");
-            return None;
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
+        if !stderr.is_empty() {
+            log::warn!(target: "backend::snapper", "{stderr}" );
         }
 
         let stderr = String::from_utf8_lossy(&snapper_output.stderr);
         if !stderr.is_empty() {
-            log::warn!(target: "backend::snapper", "{}", stderr );
+            log::warn!(target: "backend::snapper", "{stderr}" );
         }
 
-        let jsonout: Value =
-            serde_json::from_slice(&snapper_output.stdout).expect("json should be valid");
-
-        let subvolume = PathBuf::from(jsonout.get("SUBVOLUME").and_then(Value::as_str)?);
+        let jsonout: Value = serde_json::from_slice(&snapper_output.stdout)
+            .expect("snapper json output should be valid");
+        let Some(subvolume) = jsonout.get("SUBVOLUME").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let subvolume = PathBuf::from(subvolume);
         let config_id = config_id.to_string();
 
-        Some(Self {
+        Ok(Some(Self {
             config_id,
             subvolume,
-        })
+        }))
+    }
+
+    /// The subvolume that is managed by the [SnapperConfig].
+    pub fn subvolume(&self) -> PathBuf {
+        self.subvolume.clone()
+    }
+
+    /// The config id of the [SnapperConfig].
+    pub fn config_id(&self) -> &str {
+        &self.config_id
     }
 }
 
 impl SnapperConfig {
-    pub fn snapshots(&self) -> Vec<Snapshot> {
+    /// List all snapshots associated with the [SnapperConfig].
+    pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
         log::trace!(
             target: "backends::snapper::config",
             "Running: snapper --jsonout -c {} list --columns number,userdata,cleanup,date",
             self.config_id
         );
-        let snapper_output = Command::new("snapper")
+        let mut snapper_command = Command::new("snapper");
+        snapper_command
             .arg("--jsonout")
             .arg("-c")
             .arg(&self.config_id)
             .arg("list")
             .arg("--columns")
-            .arg("number,userdata,cleanup,date")
+            .arg("number,userdata,cleanup,date");
+        let snapper_output = snapper_command
             .output()
-            .expect("Failed to execute snapper command");
-        assert!(snapper_output.status.success(), "snapper command failed");
-
+            .map_err(SnapperConfigError::SnapperNotRun)?;
         let stderr = String::from_utf8_lossy(&snapper_output.stderr);
-
+        if !snapper_output.status.success() {
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
         if !stderr.is_empty() {
-            log::warn!(target: "backend::snapper", "{}", stderr );
+            log::warn!(target: "backend::snapper", "{stderr}" );
         }
 
-        let jsonout: Value =
-            serde_json::from_slice(&snapper_output.stdout).expect("json should be valid");
+        let jsonout: Value = serde_json::from_slice(&snapper_output.stdout)
+            .expect("snapper json output should be valid");
 
         let snapshots = jsonout
             .get(&self.config_id)
@@ -130,7 +218,7 @@ impl SnapperConfig {
             .as_array()
             .expect("json snapshot list should be an array");
 
-        snapshots
+        Ok(snapshots
             .iter()
             .filter_map(|snapshot| {
                 let snap_id = snapshot.get("number").and_then(|v| v.as_u64())?;
@@ -161,34 +249,40 @@ impl SnapperConfig {
                 let snapshot = Snapshot::new(self.clone(), snap_id, userdata, cleanup, date);
                 Some(snapshot)
             })
-            .collect()
+            .collect())
     }
 
-    pub fn snapshot(&self, snapshot_id: u64) -> Option<Snapshot> {
-        self.snapshots()
+    /// Return snapshot with `snapshot_id` if present.
+    pub fn snapshot(&self, snapshot_id: u64) -> Result<Option<Snapshot>> {
+        Ok(self
+            .snapshots()?
             .into_iter()
-            .find(|snap| snap.id() == snapshot_id)
+            .find(|snap| snap.id() == snapshot_id))
     }
 
-    pub fn unsynced_snapshots(&self) -> impl Iterator<Item = Snapshot> {
-        self.snapshots().into_iter().filter(Snapshot::is_unsynced)
+    /// Return all snapshots that aren't marked as synced.
+    pub fn unsynced_snapshots(&self) -> Result<impl Iterator<Item = Snapshot>> {
+        Ok(self.snapshots()?.into_iter().filter(Snapshot::is_unsynced))
     }
 
-    pub fn anchored_snapshot(&self) -> Option<Snapshot> {
+    /// Return the anchored snapshot.
+    pub fn anchored_snapshot(&self) -> Result<Option<Snapshot>> {
         debug_assert_eq!(
-            self.snapshots()
+            self.snapshots()?
                 .into_iter()
                 .filter(Snapshot::is_anchored)
-                .skip(1)
-                .next(),
+                .nth(1),
             None,
             "there should only be one anchor"
         );
 
-        self.snapshots().into_iter().find(Snapshot::is_anchored)
+        Ok(self.snapshots()?.into_iter().find(Snapshot::is_anchored))
     }
 
-    pub fn create_snapshot(&self, cleanup: Option<SnapperCleanupAlgorithm>) -> Snapshot {
+    /// Create a new snapshot.
+    ///
+    /// If no [SnapperCleanupAlgorithm] is provided the snapshot must be manually deleted later.
+    pub fn create_snapshot(&self, cleanup: Option<SnapperCleanupAlgorithm>) -> Result<Snapshot> {
         log::info!(target: "backends::snapper::config", "Create snapshot: {}", self.config_id);
 
         let mut snapper_command = Command::new("snapper");
@@ -208,8 +302,8 @@ impl SnapperConfig {
 
             log::trace!(
                 target: "backends::snapper::config",
-                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup' -c {}",
-                self.config_id, algorithm.to_string()
+                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup' -c {algorithm}",
+                self.config_id,
             );
         } else {
             log::trace!(
@@ -221,23 +315,33 @@ impl SnapperConfig {
 
         let snapper_output = snapper_command
             .output()
-            .expect("Failed to execute snapper command");
-        assert!(snapper_output.status.success(), "snapper command failed");
+            .map_err(SnapperConfigError::SnapperNotRun)?;
+        let stderr = String::from_utf8_lossy(&snapper_output.stderr);
+        if !snapper_output.status.success() {
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
+        if !stderr.is_empty() {
+            log::warn!(target: "backend::snapper", "{stderr}" );
+        }
 
         let stdout = String::from_utf8_lossy(&snapper_output.stdout);
         let stderr = String::from_utf8_lossy(&snapper_output.stderr);
 
         if !stderr.is_empty() {
-            log::warn!(target: "backend::snapper", "{}", stderr );
+            log::warn!(target: "backend::snapper", "{stderr}" );
         }
 
         let id = stdout
             .trim()
             .parse()
             .expect("snapper should output valid snapshot id");
-        log::debug!(target: "backends::snapper::config", "Created snapshot: {}", id);
+        log::debug!(target: "backends::snapper::config", "Created snapshot: {id}");
 
-        self.snapshot(id)
-            .expect("just created snapshot should exist")
+        Ok(self
+            .snapshot(id)?
+            .expect("just created snapshot should exist"))
     }
 }

@@ -1,3 +1,5 @@
+//! Implements backup of Nextcloud's `config.php` using [Config].
+
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -12,11 +14,13 @@ use crate::nextcloud::Nextcloud;
 
 const CONFIG_BACKUP_DEST: &str = "config/";
 
-pub struct ConfigBackend {
+/// The [Config] backend allows you to backup Nextcloud's `config.php`.
+pub struct Config {
     config_backup_dest: PathBuf,
 }
 
-impl ConfigBackend {
+impl Config {
+    /// Create a new [Config] instance.
     pub fn new(backup_root: &Path) -> Self {
         let config_backup_root = backup_root.join(CONFIG_BACKUP_DEST);
         if config_backup_root.is_relative() {
@@ -40,7 +44,7 @@ impl ConfigBackend {
     }
 }
 
-impl Backup for ConfigBackend {
+impl Backup for Config {
     type Error = io::Error;
 
     fn backup(&mut self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {

@@ -1,3 +1,5 @@
+//! Implements backup of Nextcloud's data using [Snapper].
+
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::process::{Command, Stdio};
@@ -5,15 +7,18 @@ use std::str::FromStr;
 use std::{io, path::PathBuf};
 
 use clap::ValueEnum;
-use derive_more::{Display, Error};
+use derive_more::{Display, Error, From};
 use log::Level;
 
-use crate::backends::snapper::snapshot::Snapshot;
-use crate::backends::Backup;
-use config::SnapperConfig;
+use crate::nextcloud::{Nextcloud, OccError};
+use super::Backup;
 
-pub mod config;
-pub mod snapshot;
+
+mod config;
+mod snapshot;
+
+pub use snapshot::{Snapshot, SyncSnapshotError};
+pub use config::{SnapperConfig, SnapperConfigError};
 
 /// [Snapper](http://snapper.io): A backend utilizing the btrfs snapshot capabilities.
 ///
@@ -60,31 +65,49 @@ pub struct Snapper {
 
 impl Snapper {}
 
-#[derive(Debug, Display, Error)]
-pub enum SnapperError {
-    #[display("Snapper config not found for {_0}")]
-    SnapperConfigNotFound(#[error(ignore)] String),
+#[derive(Debug, Display, Error, From)]
+/// Errors on backup of the data directory of the [Nextcloud] installation.
+pub enum SnapperBackupError {
+    /// No Snapper config for the data directory of [Nextcloud] found.
+    #[display("Snapper config not found")]
+    SnapperConfigNotFound(#[error(ignore)] PathBuf),
+    /// Sync destination can't be created.
     #[display("Unable to create sync destination folder")]
     SyncDestinationCantBeCreated(io::Error),
+    /// Obtaining the [SnapperConfig] of the [Nextcloud] installation failed.
+    #[display("Obtaining the snapper-config of the nextcloud installation failed: {_0}")]
+    SnapperConfig(SnapperConfigError),
+    /// Creating a [Snapshot] as backup failed.
+    #[display("Creating a backup snapshot failed: {_0}")]
+    CreationFailed(SnapperConfigError),
+    /// Obtaining the anchor [Snapshot] failed.
+    #[display("Obtaining anchor snapshot failed: {_0}")]
+    ObtainingAnchorFailed(SnapperConfigError),
+    /// Obtaining unsynced [Snapshot] failed.
+    #[display("Obtaining unsynced snapshot(s) failed: {_0}")]
+    ObtainingUnsyncedFailed(SnapperConfigError),
+    
+
+    /// Nextcloud `occ` command failed.
+    #[from]
+    Occ(OccError),
 }
 
 impl Backup for Snapper {
-    type Error = SnapperError;
+    type Error = SnapperBackupError;
 
     fn backup(
         &mut self,
-        nextcloud: &crate::nextcloud::Nextcloud,
+        nextcloud: &Nextcloud,
         _dry_run: bool, // TODO: support dry_run
     ) -> Result<(), Self::Error> {
-        let data_dir = nextcloud.occ.data_directory();
+        let data_dir = nextcloud.occ().data_directory()?;
         assert!(data_dir.is_dir(), "Nextcloud Data directory should exist");
 
-        let cfg = SnapperConfig::by_dir(&data_dir).ok_or(SnapperError::SnapperConfigNotFound(
-            format!("{}", data_dir.display()),
-        ))?;
+        let cfg = SnapperConfig::by_dir(&data_dir).map_err(SnapperBackupError::SnapperConfig)?
+            .ok_or(SnapperBackupError::SnapperConfigNotFound(data_dir))?;
 
-        // mark snapshot not synced
-        let _ = cfg.create_snapshot(self.cleanup_algorithm);
+        let _ = cfg.create_snapshot(self.cleanup_algorithm).map_err(SnapperBackupError::CreationFailed)?;
 
         let Some(ref sync_destination) = self.sync_destination else {
             log::warn!(target: "backend::snapper", "Not syncing snapshots to other destination");
@@ -96,24 +119,28 @@ impl Backup for Snapper {
             Ok(synced) => {
                 log::debug!(target: "backend::snapper", "Synchronize deletion to sync destination");
 
-                let present_snapshots: HashSet<_> =
-                    cfg.snapshots().iter().map(Snapshot::id).collect();
-                log::trace!(target: "backend::snapper", "Snapshots present: {:?}", present_snapshots);
+                let present_snapshots = match cfg.snapshots() {
+                    Ok(present_snapshots) => present_snapshots.iter().map(Snapshot::id).collect(),
+                    Err(e) => {
+                        log::warn!(target: "backend::snapper", "Can't determine present snapshots: {e}");
+                        HashSet::with_capacity(0)
+                    }
+                };
+                log::trace!(target: "backend::snapper", "Snapshots present: {present_snapshots:?}");
 
                 let subv_deletions = synced.filter_map(|entry| {
-                    let Ok(path) = entry.map(|entry| entry.path()) else {
-                        return None;
-                    };
-
-                    // check if directory is a snapshot dir
+                    let entry = entry.ok()?;
+                    let path = entry.path();
                     if !path.is_dir() {
                         return None;
                     }
+                    
                     // delete empty dirs
                     if std::fs::remove_dir(&path).is_ok() {
                         log::trace!(target: "backend::snapper", "Deleted empty direcotry at sync destination: {}", path.display());
                         return None;
                     }
+
                     if !path.join("snapshot/").is_dir() {
                         return None;
                     }
@@ -122,14 +149,14 @@ impl Backup for Snapper {
                     else {
                         return None;
                     };
-                    log::trace!(target: "backend::snapper", "Found snapshot present at sync destination: {}", snapshot_id);
+                    log::trace!(target: "backend::snapper", "Found snapshot present at sync destination: {snapshot_id}");
 
                     // don't delete present snapshots!
                     if present_snapshots.contains(&snapshot_id) {
                         return None;
                     }
 
-                    log::debug!(target: "backend::snapper", "Sync deletion of snapshot to sync destination: {}", snapshot_id);
+                    log::debug!(target: "backend::snapper", "Sync deletion of snapshot to sync destination: {snapshot_id}");
                     let mut btrfs_subv_del = Command::new("sudo");
                     btrfs_subv_del.arg("btrfs");
                     // enable verbose btrfs-receive output
@@ -151,7 +178,7 @@ impl Backup for Snapper {
                         .spawn();
                     
                     if let Err(ref e) = btrfs_subv_del {
-                        log::error!(target: "backend::snapper", "Deletion of snapshot {} at sync destination failed: {}", snapshot_id, e);
+                        log::error!(target: "backend::snapper", "Deletion of snapshot {snapshot_id} at sync destination failed: {e}");
                     }
                     btrfs_subv_del.ok().map(|c| (c, snapshot_id))
                 });
@@ -160,32 +187,31 @@ impl Backup for Snapper {
                 for (mut deletion, snapshot_id) in subv_deletions {
                     match deletion.wait() {
                         Ok(status) if status.success() => {
-                             log::trace!(target: "backend::snapper", "Finished deletion of snapshot at sync destination: {}", snapshot_id);
+                             log::trace!(target: "backend::snapper", "Finished deletion of snapshot at sync destination: {snapshot_id}");
                         }
                         Ok(status) => {
-                             log::error!(target: "backend::snapper", "Deletion of snapshot {} at sync destination failed: {}", snapshot_id, status);
+                             log::error!(target: "backend::snapper", "Deletion of snapshot {snapshot_id} at sync destination failed: {status}");
                         }
-                        Err(e) => log::error!(target: "backend::snapper", "Couldn't run deletion of snapshot {} at sync destination: {}", snapshot_id, e),
+                        Err(e) => log::error!(target: "backend::snapper", "Couldn't run deletion of snapshot {snapshot_id} at sync destination: {e}"),
                     }
                 }
             }
-            Err(e) => {
-                log::debug!(target: "backend::snapper", "Reading sync destination failed: {}", e);
+            Err(_) => {
+                std::fs::create_dir_all(sync_destination)
+                    .map_err(SnapperBackupError::SyncDestinationCantBeCreated)?;
             }
         }
 
-        let mut orig_anchor = cfg.anchored_snapshot();
+        let mut orig_anchor = cfg.anchored_snapshot().map_err(SnapperBackupError::ObtainingAnchorFailed)?;
         let mut anchor = orig_anchor.clone();
-        if let Some(ref mut anchor) = anchor {
-            log::debug!(target: "backend::snapper", "Found anchor snapshot of last sync: {:?}", anchor);
+        if let Some(ref anchor) = anchor {
+            log::debug!(target: "backend::snapper", "Found anchor snapshot of last sync: {anchor:?}");
         }
 
         // WARN: maybe we need to sort them a smart way?
         // in theory there should only be one unsynced snapshot
-        for mut snap in cfg.unsynced_snapshots() {
+        for mut snap in cfg.unsynced_snapshots().map_err(SnapperBackupError::ObtainingUnsyncedFailed)? {
             let sync_destination = sync_destination.join(format!("{}/", snap.id()));
-            std::fs::create_dir_all(&sync_destination)
-                .map_err(SnapperError::SyncDestinationCantBeCreated)?;
 
             if let Some(ref mut anchor) = anchor {
                 // sync snapshot incrementally using our anchor snapshot
@@ -197,7 +223,7 @@ impl Backup for Snapper {
 
                 // update anchor to newly synced snapshot
                 *anchor = snap;
-                log::trace!(target: "backend::snapper", "Promoted snapshot to new anchor: {:?}", anchor);
+                log::trace!(target: "backend::snapper", "Promoted snapshot to new anchor: {anchor:?}");
             } else {
                 // sync initial snapshot so we can later sync incrementally
                 snap.sync(&sync_destination).unwrap();
@@ -209,7 +235,7 @@ impl Backup for Snapper {
         }
 
         let mut anchor = anchor.expect("after syncing there has to be an anchor");
-        log::debug!(target: "backend::snapper", "Anchoring snapshot for next time: {:?}", anchor);
+        log::debug!(target: "backend::snapper", "Anchoring snapshot for next time: {anchor:?}");
         anchor.anchor();
         anchor.set_cleanup(None); // prevent deletion before next sync/backup
         let anchor = anchor;
@@ -217,9 +243,10 @@ impl Backup for Snapper {
         if let Some(ref mut orig_anchor) = orig_anchor {
             assert_ne!(&anchor, orig_anchor, "anchor should change after syncing");
 
-            log::debug!(target: "backend::snapper", "Releasing previous anchor snapshot: {:?}", orig_anchor);
+            log::debug!(target: "backend::snapper", "Releasing previous anchor snapshot: {orig_anchor:?}");
             orig_anchor.release();
-            orig_anchor.set_cleanup(self.cleanup_algorithm); // restore cleanup algorithm because this anchor is now no longer needed
+            // restore cleanup algorithm because this anchor is now no longer needed
+            orig_anchor.set_cleanup(self.cleanup_algorithm);
         }
 
         Ok(())
@@ -241,6 +268,7 @@ pub enum SnapperCleanupAlgorithm {
     Timeline,
 }
 
+/// Cleanup algorithm set by [Snapper] is unknown.
 #[derive(Debug, Display, Error)]
 #[display("Cleanup algorithm is unkown: {_0}")]
 pub struct UnkownCleanupAlgorithm(#[error(ignore)] String);

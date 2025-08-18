@@ -16,7 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive", "env"] }
-derive_more = { version = "2.0", features = ["display", "error"] }
+derive_more = { version = "2.0", features = ["display", "error", "from"] }
 env_logger = "0.11"
 flate2 = "1.0"
 log = "0.4"

@@ -1,10 +1,16 @@
+//! Components for the binary command-line interface.
+
 use std::{path::PathBuf, str::FromStr};
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use log::LevelFilter;
 
-use crate::backends::snapper::{SnapperCleanupAlgorithm, UnkownCleanupAlgorithm};
+use crate::{
+    backends::snapper::{SnapperCleanupAlgorithm, UnkownCleanupAlgorithm},
+    nextcloud::DEFAULT_INSTALLATION_ROOT,
+};
 
+/// Main command-line struct.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
@@ -12,8 +18,8 @@ pub struct Cli {
     #[arg(long)]
     pub verbose: Option<LevelFilter>,
 
-    /// Root directory of the Nextcloud server instance.
-    #[arg(long, default_value = "/var/www/nextcloud")]
+    /// Directory of the Nextcloud server installation.
+    #[arg(long, default_value = DEFAULT_INSTALLATION_ROOT)]
     pub document_root: PathBuf,
 
     /// Update nextcloud apps after backup.
@@ -51,19 +57,20 @@ pub struct Cli {
     /// Folder for Nextcloud config and database backups and backup-logs.
     pub backup_root: PathBuf,
 
-    /// A backend utilizing the btrfs snapshot capabilities. See: http://snapper.io
+    /// A backend utilizing the btrfs snapshot capabilities. See: <http://snapper.io>
     #[arg(long, group = "data_backend", default_value = "true")]
     pub snapper: bool,
 
     #[command(flatten)]
+    /// Arguments supplied to the [Snapper][crate::backends::snapper] backend.
     pub snapper_args: SnapperArgs,
 
-    //#[arg(long, group = "data_backend")]
-    //pub rsync: bool,
+    /// Actions to perform.
     #[command(subcommand)]
     pub action: Option<Action>,
 }
 
+/// Arguements for the [Snapper][crate::backends::snapper] backend.
 #[derive(Args, Debug)]
 #[group(multiple = true, requires = "snapper")]
 pub struct SnapperArgs {
@@ -82,6 +89,7 @@ pub struct SnapperArgs {
 }
 
 // HACK: Clap has "issues" with utilizing a ValueParser for Option<SnapperCleanupAlgorithm>...
+#[allow(missing_docs)]
 #[derive(Debug, Clone)]
 pub enum MaybeSnapperCleanupAlgorithm {
     None,
@@ -111,8 +119,13 @@ impl From<MaybeSnapperCleanupAlgorithm> for Option<SnapperCleanupAlgorithm> {
 }
 
 #[derive(Subcommand, Debug, Default)]
+/// Action to perform.
 pub enum Action {
     /// Backup the Nextcloud config, database and data. (Default)
     #[default]
     Backup,
+    /* TODO: Implement restore action
+    /// Restore a backup.
+    Restore,
+    */
 }

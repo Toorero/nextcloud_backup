@@ -1,11 +1,22 @@
+//! Backend modules for performing individual backup tasks.
+//!
+//! Currently the following backends are implemented:
+//!
+//! - [MariaDb]: Compressed backup of the Nextcloud MariaDB tables.
+//! - [Snapper]: Atomic backup of user-data of the Nextcloud.
+//! - [Config]: Backup of Nextcloud's `config.php`
+
 pub mod config;
 pub mod mariadb;
 pub mod snapper;
 
+pub use config::Config;
+pub use mariadb::MariaDb;
 pub use snapper::Snapper;
 
 use crate::nextcloud::Nextcloud;
 
+#[allow(missing_docs)]
 pub trait Backup {
     /// Error that may happen on backup.
     type Error;
