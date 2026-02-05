@@ -14,6 +14,8 @@ pub use config::Config;
 pub use mariadb::MariaDb;
 pub use snapper::Snapper;
 
+use crate::backends::config::ConfigConfig;
+use crate::backends::mariadb::MariaDbConfig;
 use crate::nextcloud::Nextcloud;
 
 #[allow(missing_docs)]
@@ -30,5 +32,16 @@ pub trait Backup {
     ///
     /// Instead sanity checks are performed to determine if a "real" backup
     /// would succeed under the present conditions.
-    fn backup(&mut self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error>;
+    fn backup(&self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+/// Configuration of all available backends.
+pub struct BackendsConfig {
+    /// Configuration of the [Config] backend.
+    pub config: ConfigConfig,
+    /// Configuration of the [MariaDb] backend.
+    pub mariadb: MariaDbConfig,
+    /// Configuration of the [Snapper] backend.
+    pub snapper: Snapper,
 }

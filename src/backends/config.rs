@@ -15,13 +15,34 @@ use crate::nextcloud::Nextcloud;
 const CONFIG_BACKUP_DEST: &str = "config/";
 
 /// The [Config] backend allows you to backup Nextcloud's `config.php`.
+#[derive(Debug, serde::Deserialize)]
 pub struct Config {
     config_backup_dest: PathBuf,
+
+    config: ConfigConfig,
+}
+
+/// Configuration of [Config].
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConfigConfig {
+    /// Days of Nextcloud `config.php`'s' to keep.
+    #[serde(default = "default_days_to_keep")]
+    pub days_to_keep: u8,
+}
+
+impl Default for ConfigConfig {
+    fn default() -> Self {
+        Self {
+            days_to_keep: default_days_to_keep(),
+        }
+    }
+}
+fn default_days_to_keep() -> u8 {
+    35
 }
 
 impl Config {
-    /// Create a new [Config] instance.
-    pub fn new(backup_root: &Path) -> Self {
+    pub fn with_config(backup_root: &Path, config: ConfigConfig) -> Self {
         let config_backup_root = backup_root.join(CONFIG_BACKUP_DEST);
         if config_backup_root.is_relative() {
             log::warn!(target: "backend::config", "config_backup_root is relative: {}", config_backup_root.display());
@@ -29,7 +50,12 @@ impl Config {
 
         Self {
             config_backup_dest: config_backup_root,
+            config,
         }
+    }
+
+    pub fn new(backup_root: &Path) -> Self {
+        Self::with_config(backup_root, Default::default())
     }
 
     fn generate_config_backup_filename(&self) -> PathBuf {
@@ -47,7 +73,7 @@ impl Config {
 impl Backup for Config {
     type Error = io::Error;
 
-    fn backup(&mut self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {
+    fn backup(&self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {
         let config_path = nextcloud.config();
         log::info!(target: "backend::config", "Create backup of Nextcloud config: {}", config_path.display());
 

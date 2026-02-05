@@ -16,19 +16,46 @@ use crate::nextcloud::{Nextcloud, OccError};
 const DB_DUMP_DEST: &str = "db/";
 
 /// Allows you to backup the
+#[derive(Debug)]
 pub struct MariaDb {
     db_dump_dest: PathBuf,
+    config: MariaDbConfig,
+}
+
+/// Configuration of [MariaDb].
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct MariaDbConfig {
+    /// Days of Nextcloud MariaDB dumps to keep.
+    #[serde(default = "default_days_to_keep")]
+    pub days_to_keep: u8,
+}
+
+impl Default for MariaDbConfig {
+    fn default() -> Self {
+        Self {
+            days_to_keep: default_days_to_keep(),
+        }
+    }
+}
+fn default_days_to_keep() -> u8 {
+    35
 }
 
 impl MariaDb {
-    /// Create a new [MariaDb] instance.
-    pub fn new(backup_root: &Path) -> Self {
+    pub fn with_config(backup_root: &Path, config: MariaDbConfig) -> Self {
         let db_dump_dest = backup_root.join(DB_DUMP_DEST);
         if db_dump_dest.is_relative() {
             log::warn!(target: "backend::mariadb", "db_dump_dest is relative: {}", db_dump_dest.display());
         }
 
-        Self { db_dump_dest }
+        Self {
+            db_dump_dest,
+            config,
+        }
+    }
+
+    pub fn new(backup_root: &Path) -> Self {
+        Self::with_config(backup_root, Default::default())
     }
 
     fn generate_db_dump_filename(&self) -> PathBuf {
@@ -73,7 +100,7 @@ pub enum MariaDbError {
 impl Backup for MariaDb {
     type Error = MariaDbError;
 
-    fn backup(&mut self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {
+    fn backup(&self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {
         let table_name = nextcloud.occ().db_name()?;
         let table_usr = nextcloud.occ().db_user()?;
         log::info!(target: "backend::mariadb", "Create database dump of the Nextcloud table: {table_name}");

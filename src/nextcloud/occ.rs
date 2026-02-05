@@ -39,36 +39,18 @@ type Result<T> = std::result::Result<T, OccError>;
 
 /// Access to the command-line interface of Nextcloud.
 #[derive(Debug, Clone)]
-pub struct Occ {
-    /// Path to the occ php file.
-    occ: PathBuf,
-}
-
-impl Occ {
-    /// Create a new [Occ] instance.
-    ///
-    /// You should obtain an [Occ] instance through [Nextcloud::occ][super::Nextcloud::occ].
-    pub fn new(occ_path: PathBuf) -> std::result::Result<Self, OccPathError> {
-        if !occ_path.try_exists()? {
-            return Err(OccPathError::PathNotFound(occ_path));
-        }
-
-        Ok(Self { occ: occ_path })
-    }
-}
+pub struct Occ;
 
 impl Occ {
     fn execute_command(&self, command: &str, args: &[&str]) -> Result<String> {
         log::trace!(
             target: "nextcloud::occ",
-            "Running: php {} --no-warnings {} {}",
-            self.occ.as_path().display(),
+            "Running: occ --no-warnings {} {}",
             command,
             args.join(" ")
         );
-        let mut occ_command = Command::new("php");
+        let mut occ_command = Command::new("occ");
         occ_command
-            .arg(self.occ.as_path())
             .arg("--no-warnings") // suppress maintenance mode is enabled warning
             .arg(command)
             .args(args);

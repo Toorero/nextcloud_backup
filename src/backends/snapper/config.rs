@@ -6,7 +6,7 @@ use chrono::NaiveDateTime;
 use derive_more::{Display, Error};
 use serde_json::Value;
 
-use super::snapshot::{Snapshot, SYNCED_ID};
+use super::snapshot::Snapshot;
 use super::SnapperCleanupAlgorithm;
 
 #[derive(Debug, Clone)]
@@ -184,7 +184,7 @@ impl SnapperConfig {
     pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
         log::trace!(
             target: "backends::snapper::config",
-            "Running: snapper --jsonout -c {} list --columns number,userdata,cleanup,date",
+            "Running: snapper --jsonout -c {} list --columns number,userdata,cleanup,date,description",
             self.config_id
         );
         let mut snapper_command = Command::new("snapper");
@@ -194,7 +194,7 @@ impl SnapperConfig {
             .arg(&self.config_id)
             .arg("list")
             .arg("--columns")
-            .arg("number,userdata,cleanup,date");
+            .arg("number,userdata,cleanup,date,description");
         let snapper_output = snapper_command
             .output()
             .map_err(SnapperConfigError::SnapperNotRun)?;
@@ -225,7 +225,7 @@ impl SnapperConfig {
 
                 let userdata = snapshot
                     .get("userdata")
-                    .and_then(|v| v.as_object())
+                    .and_then(serde_json::Value::as_object)
                     .map(|map| {
                         map.into_iter()
                             .filter_map(|(k, v)| {
@@ -243,10 +243,16 @@ impl SnapperConfig {
 
                 let date = snapshot
                     .get("date")
-                    .and_then(|v| v.as_str())
+                    .and_then(serde_json::Value::as_str)
                     .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())?;
 
-                let snapshot = Snapshot::new(self.clone(), snap_id, userdata, cleanup, date);
+                let description = snapshot
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(String::from);
+
+                let snapshot =
+                    Snapshot::new(self.clone(), snap_id, userdata, cleanup, date, description);
                 Some(snapshot)
             })
             .collect())
@@ -258,25 +264,6 @@ impl SnapperConfig {
             .snapshots()?
             .into_iter()
             .find(|snap| snap.id() == snapshot_id))
-    }
-
-    /// Return all snapshots that aren't marked as synced.
-    pub fn unsynced_snapshots(&self) -> Result<impl Iterator<Item = Snapshot>> {
-        Ok(self.snapshots()?.into_iter().filter(Snapshot::is_unsynced))
-    }
-
-    /// Return the anchored snapshot.
-    pub fn anchored_snapshot(&self) -> Result<Option<Snapshot>> {
-        debug_assert_eq!(
-            self.snapshots()?
-                .into_iter()
-                .filter(Snapshot::is_anchored)
-                .nth(1),
-            None,
-            "there should only be one anchor"
-        );
-
-        Ok(self.snapshots()?.into_iter().find(Snapshot::is_anchored))
     }
 
     /// Create a new snapshot.
@@ -291,8 +278,6 @@ impl SnapperConfig {
             .arg(&self.config_id)
             .arg("create")
             .arg("-p") // echo snapshot id
-            .arg("-u")
-            .arg(format!("{SYNCED_ID}=false"))
             .arg("--description")
             .arg("Full Nextcloud Backup");
 
@@ -302,13 +287,13 @@ impl SnapperConfig {
 
             log::trace!(
                 target: "backends::snapper::config",
-                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup' -c {algorithm}",
+                "Running: snapper -c {} create -p  --description 'Full Nextcloud Backup' -c {algorithm}",
                 self.config_id,
             );
         } else {
             log::trace!(
                 target: "backends::snapper::config",
-                "Running: snapper -c {} create -p -u {SYNCED_ID}=false --description 'Full Nextcloud Backup'",
+                "Running: snapper -c {} create -p --description 'Full Nextcloud Backup'",
                 self.config_id,
             );
         }

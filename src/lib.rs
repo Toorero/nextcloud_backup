@@ -7,7 +7,6 @@
 //! [nc_backup]: https://docs.nextcloud.com/server/latest/admin_manual/maintenance/backup.html
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
 
 pub mod backends;
 pub mod cli;

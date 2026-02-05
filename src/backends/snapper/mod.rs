@@ -1,30 +1,25 @@
 //! Implements backup of Nextcloud's data using [Snapper].
 
-use std::collections::HashSet;
-use std::ffi::OsStr;
-use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::{io, path::PathBuf};
 
 use clap::ValueEnum;
 use derive_more::{Display, Error, From};
-use log::Level;
 
-use crate::nextcloud::{Nextcloud, OccError};
 use super::Backup;
-
+use crate::nextcloud::{Nextcloud, OccError};
 
 mod config;
 mod snapshot;
 
-pub use snapshot::{Snapshot, SyncSnapshotError};
 pub use config::{SnapperConfig, SnapperConfigError};
+pub use snapshot::{Snapshot, SyncSnapshotError};
 
 /// [Snapper](http://snapper.io): A backend utilizing the btrfs snapshot capabilities.
 ///
 /// It's possible to additionally send snapshots to different locations
 /// for redundancy. See [`sync_desetionation`](Self::sync_destination) for more details.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Snapper {
     /// Algorithms to clean up old snapshots.
     ///
@@ -38,32 +33,21 @@ pub struct Snapper {
     /// </div>
     ///
     /// [`snapper(8)`]: https://man.archlinux.org/man/snapper.8
+    #[serde(default = "default_cleanup")]
     pub cleanup_algorithm: Option<SnapperCleanupAlgorithm>,
-
-    /// Snapshots created by [Snapper] can be send to a different location
-    /// to have the data stored at multiple locations.
-    /// This backend utilizes [`btrfs-send(8)`] and [`btrfs-receive(8)`].
-    ///
-    /// <div class="warning">
-    /// The deletion of snapshots is synced to the destination as well.
-    /// </div>
-    ///
-    /// This backend guarantees that at least one backup by this backend
-    /// is present to allow redundant transfers to happen incrementally.
-    ///
-    /// [`btrfs-send(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-send.8.en
-    /// [`btrfs-receive(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-receive.8.en
-    pub sync_destination: Option<PathBuf>,
-
-    /// If set snapshots are send incrementally using [`btrfs-send(8)`] and [`btrfs-receive(8)`].
-    /// Otherwise all snapshots are synced in full utilizing the same method.
-    ///
-    /// [`btrfs-send(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-send.8.en
-    /// [`btrfs-receive(8)`]: https://man.archlinux.org/man/core/btrfs-progs/btrfs-receive.8.en
-    pub incrementally: bool,
 }
 
-impl Snapper {}
+impl Default for Snapper {
+    fn default() -> Self {
+        Self {
+            cleanup_algorithm: default_cleanup(),
+        }
+    }
+}
+
+fn default_cleanup() -> Option<SnapperCleanupAlgorithm> {
+    Some(Default::default())
+}
 
 #[derive(Debug, Display, Error, From)]
 /// Errors on backup of the data directory of the [Nextcloud] installation.
@@ -86,7 +70,6 @@ pub enum SnapperBackupError {
     /// Obtaining unsynced [Snapshot] failed.
     #[display("Obtaining unsynced snapshot(s) failed: {_0}")]
     ObtainingUnsyncedFailed(SnapperConfigError),
-    
 
     /// Nextcloud `occ` command failed.
     #[from]
@@ -96,158 +79,19 @@ pub enum SnapperBackupError {
 impl Backup for Snapper {
     type Error = SnapperBackupError;
 
-    fn backup(
-        &mut self,
-        nextcloud: &Nextcloud,
-        _dry_run: bool, // TODO: support dry_run
-    ) -> Result<(), Self::Error> {
+    fn backup(&self, nextcloud: &Nextcloud, dry_run: bool) -> Result<(), Self::Error> {
+        assert!(!dry_run, "dry run not supported for snapper");
+
         let data_dir = nextcloud.occ().data_directory()?;
         assert!(data_dir.is_dir(), "Nextcloud Data directory should exist");
 
-        let cfg = SnapperConfig::by_dir(&data_dir).map_err(SnapperBackupError::SnapperConfig)?
+        let cfg = SnapperConfig::by_dir(&data_dir)
+            .map_err(SnapperBackupError::SnapperConfig)?
             .ok_or(SnapperBackupError::SnapperConfigNotFound(data_dir))?;
 
-        let _ = cfg.create_snapshot(self.cleanup_algorithm).map_err(SnapperBackupError::CreationFailed)?;
-
-        let Some(ref sync_destination) = self.sync_destination else {
-            log::warn!(target: "backend::snapper", "Not syncing snapshots to other destination");
-            return Ok(());
-        };
-
-        // delete subvolumes at sync destination that are not present at source
-        match sync_destination.read_dir() {
-            Ok(synced) => {
-                log::debug!(target: "backend::snapper", "Synchronize deletion to sync destination");
-
-                let present_snapshots = match cfg.snapshots() {
-                    Ok(present_snapshots) => present_snapshots.iter().map(Snapshot::id).collect(),
-                    Err(e) => {
-                        log::warn!(target: "backend::snapper", "Can't determine present snapshots: {e}");
-                        HashSet::with_capacity(0)
-                    }
-                };
-                log::trace!(target: "backend::snapper", "Snapshots present: {present_snapshots:?}");
-
-                let subv_deletions = synced.filter_map(|entry| {
-                    let entry = entry.ok()?;
-                    let path = entry.path();
-                    if !path.is_dir() {
-                        return None;
-                    }
-                    
-                    // delete empty dirs
-                    if std::fs::remove_dir(&path).is_ok() {
-                        log::trace!(target: "backend::snapper", "Deleted empty direcotry at sync destination: {}", path.display());
-                        return None;
-                    }
-
-                    if !path.join("snapshot/").is_dir() {
-                        return None;
-                    }
-                    let Some(Ok(snapshot_id)): Option<Result<u64, _>> =
-                        path.file_name().and_then(OsStr::to_str).map(str::parse)
-                    else {
-                        return None;
-                    };
-                    log::trace!(target: "backend::snapper", "Found snapshot present at sync destination: {snapshot_id}");
-
-                    // don't delete present snapshots!
-                    if present_snapshots.contains(&snapshot_id) {
-                        return None;
-                    }
-
-                    log::debug!(target: "backend::snapper", "Sync deletion of snapshot to sync destination: {snapshot_id}");
-                    let mut btrfs_subv_del = Command::new("sudo");
-                    btrfs_subv_del.arg("btrfs");
-                    // enable verbose btrfs-receive output
-                    if log::log_enabled!(target: "backend::snapper", Level::Trace) {
-                        btrfs_subv_del.arg("-v");
-
-                        log::trace!(
-                            target: "backend::snapper",
-                            "Running: sudo btrfs -v subvolume delete {}",
-                            path.join("snapshot/").display()
-                        );
-                    }
-                    btrfs_subv_del.arg("subvolume").arg("delete");
-
-                    let btrfs_subv_del = btrfs_subv_del
-                        .arg(path.join("snapshot/"))
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn();
-                    
-                    if let Err(ref e) = btrfs_subv_del {
-                        log::error!(target: "backend::snapper", "Deletion of snapshot {snapshot_id} at sync destination failed: {e}");
-                    }
-                    btrfs_subv_del.ok().map(|c| (c, snapshot_id))
-                });
-
-                // wait for completion of all deletions
-                for (mut deletion, snapshot_id) in subv_deletions {
-                    match deletion.wait() {
-                        Ok(status) if status.success() => {
-                             log::trace!(target: "backend::snapper", "Finished deletion of snapshot at sync destination: {snapshot_id}");
-                        }
-                        Ok(status) => {
-                             log::error!(target: "backend::snapper", "Deletion of snapshot {snapshot_id} at sync destination failed: {status}");
-                        }
-                        Err(e) => log::error!(target: "backend::snapper", "Couldn't run deletion of snapshot {snapshot_id} at sync destination: {e}"),
-                    }
-                }
-            }
-            Err(_) => {
-                std::fs::create_dir_all(sync_destination)
-                    .map_err(SnapperBackupError::SyncDestinationCantBeCreated)?;
-            }
-        }
-
-        let mut orig_anchor = cfg.anchored_snapshot().map_err(SnapperBackupError::ObtainingAnchorFailed)?;
-        let mut anchor = orig_anchor.clone();
-        if let Some(ref anchor) = anchor {
-            log::debug!(target: "backend::snapper", "Found anchor snapshot of last sync: {anchor:?}");
-        }
-
-        // WARN: maybe we need to sort them a smart way?
-        // in theory there should only be one unsynced snapshot
-        for mut snap in cfg.unsynced_snapshots().map_err(SnapperBackupError::ObtainingUnsyncedFailed)? {
-            let sync_destination = sync_destination.join(format!("{}/", snap.id()));
-
-            if let Some(ref mut anchor) = anchor {
-                // sync snapshot incrementally using our anchor snapshot
-                if self.incrementally {
-                    snap.sync_incrementally(anchor, &sync_destination).unwrap();
-                } else {
-                    snap.sync(&sync_destination).unwrap();
-                }
-
-                // update anchor to newly synced snapshot
-                *anchor = snap;
-                log::trace!(target: "backend::snapper", "Promoted snapshot to new anchor: {anchor:?}");
-            } else {
-                // sync initial snapshot so we can later sync incrementally
-                snap.sync(&sync_destination).unwrap();
-
-                // promote to anchor
-                anchor = Some(snap);
-                log::trace!(target: "backend::snapper", "Promoted snapshot to new anchor: {:?}", anchor.as_ref().unwrap());
-            }
-        }
-
-        let mut anchor = anchor.expect("after syncing there has to be an anchor");
-        log::debug!(target: "backend::snapper", "Anchoring snapshot for next time: {anchor:?}");
-        anchor.anchor();
-        anchor.set_cleanup(None); // prevent deletion before next sync/backup
-        let anchor = anchor;
-
-        if let Some(ref mut orig_anchor) = orig_anchor {
-            assert_ne!(&anchor, orig_anchor, "anchor should change after syncing");
-
-            log::debug!(target: "backend::snapper", "Releasing previous anchor snapshot: {orig_anchor:?}");
-            orig_anchor.release();
-            // restore cleanup algorithm because this anchor is now no longer needed
-            orig_anchor.set_cleanup(self.cleanup_algorithm);
-        }
+        let _snapshot = cfg
+            .create_snapshot(self.cleanup_algorithm)
+            .map_err(SnapperBackupError::CreationFailed)?;
 
         Ok(())
     }
@@ -258,12 +102,13 @@ impl Backup for Snapper {
 /// The algorithms are executed in a daily cronjob or systemd timer.
 /// This can be configured in the corresponding snapper configurations files
 /// along with parameters for every algorithm.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Display)]
+#[derive(Copy, Clone, ValueEnum, Debug, Display, Default, serde::Serialize, serde::Deserialize)]
 pub enum SnapperCleanupAlgorithm {
     /// Deletes old snapshots when a certain number of snapshots is reached.
     #[display("number")]
     Number,
     /// Deletes old snapshots but keeps a number of hourly, daily, weekly, monthly and yearly snapshots.
+    #[default]
     #[display("timeline")]
     Timeline,
 }

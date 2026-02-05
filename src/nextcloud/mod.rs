@@ -49,8 +49,7 @@ impl Nextcloud {
             return Err(NextcloudError::InstalltionNotFound(installation_root));
         }
 
-        let occ_path = installation_root.join("occ");
-        let occ = Occ::new(occ_path)?;
+        let occ = Occ;
 
         Ok(Self {
             occ,
