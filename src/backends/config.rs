@@ -4,45 +4,28 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use regex::Regex;
 
 use crate::backends::Backup;
 use crate::nextcloud::Nextcloud;
+use crate::util::retention::{Retention, RetentionConfig};
 
 const CONFIG_BACKUP_DEST: &str = "config/";
+const CONFIG_PREFIX: &str = "config-";
+const CONFIG_TS: &str = "%Y-%m-%dT%H-%M-%S";
+const CONFIG_SUFFIX: &str = ".php.gz";
 
 /// The [Config] backend allows you to backup Nextcloud's `config.php`.
 #[derive(Debug, serde::Deserialize)]
 pub struct Config {
     config_backup_dest: PathBuf,
-
-    config: ConfigConfig,
-}
-
-/// Configuration of [Config].
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct ConfigConfig {
-    /// Days of Nextcloud `config.php`'s' to keep.
-    #[serde(default = "default_days_to_keep")]
-    pub days_to_keep: u8,
-}
-
-impl Default for ConfigConfig {
-    fn default() -> Self {
-        Self {
-            days_to_keep: default_days_to_keep(),
-        }
-    }
-}
-fn default_days_to_keep() -> u8 {
-    35
 }
 
 impl Config {
-    pub fn with_config(backup_root: &Path, config: ConfigConfig) -> Self {
+    pub fn new(backup_root: &Path) -> Self {
         let config_backup_root = backup_root.join(CONFIG_BACKUP_DEST);
         if config_backup_root.is_relative() {
             log::warn!(target: "backend::config", "config_backup_root is relative: {}", config_backup_root.display());
@@ -50,20 +33,15 @@ impl Config {
 
         Self {
             config_backup_dest: config_backup_root,
-            config,
         }
     }
 
-    pub fn new(backup_root: &Path) -> Self {
-        Self::with_config(backup_root, Default::default())
-    }
-
     fn generate_config_backup_filename(&self) -> PathBuf {
-        let timestamp = Local::now().format("%Y-%m-%dT%H-%M-%S");
+        let timestamp = Local::now().format(CONFIG_TS);
 
         let path = self
             .config_backup_dest
-            .join(format!("config-{timestamp}.php.gz"));
+            .join(format!("{CONFIG_PREFIX}{timestamp}{CONFIG_SUFFIX}"));
         assert!(!path.exists(), "config backup file should not exist prior");
 
         path
@@ -121,7 +99,52 @@ impl Backup for Config {
         }
         log::info!(target: "backend::config", "Finished backup of Nextcloud config");
 
-        // TODO: cleanup of old backups
+        Ok(())
+    }
+
+    fn retention(
+        &self,
+        _nextcloud: &Nextcloud,
+        cfg: &RetentionConfig,
+        dry_run: bool,
+    ) -> Result<(), Self::Error> {
+        if !fs::exists(&self.config_backup_dest)? {
+            log::debug!(target: "backend::config::retain", "Backup directory doesn't exist. Nothing to retain.");
+            return Ok(());
+        }
+
+        // collect all backups created so far and parse their creation date
+        let mut backups: Vec<_> = fs::read_dir(&self.config_backup_dest)?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let Ok(file_name) = entry.file_name().into_string() else {
+                    return None;
+                };
+                let timestamp = NaiveDateTime::parse_from_str(
+                    &file_name,
+                    format!("{CONFIG_PREFIX}{CONFIG_TS}{CONFIG_SUFFIX}").as_str(),
+                )
+                .ok()?;
+                Some((entry.path(), timestamp))
+            })
+            .collect();
+        // keep the most recent backups of each kind
+        backups.sort_by(|(_, ts_1), (_, ts_2)| ts_1.cmp(ts_2).reverse());
+
+        let mut retention = Retention::from(*cfg);
+        for (path, date) in backups {
+            if retention.retain(date) {
+                log::debug!(target: "backend::config::retain", "Backup retained: {}", path.display());
+                continue;
+            }
+
+            log::info!(target: "backend::config::retain", "Discarding backup: {}", path.display());
+            if !dry_run {
+                if let Err(e) = fs::remove_file(path) {
+                    log::error!(target: "backend::config::retain", "Unable to delete backup: {e}");
+                }
+            }
+        }
 
         Ok(())
     }

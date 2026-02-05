@@ -16,8 +16,12 @@ pub struct Cli {
     pub verbose: Option<LevelFilter>,
 
     /// Directory of the Nextcloud server installation.
-    #[arg(short = 'r', long, default_value = DEFAULT_INSTALLATION_ROOT)]
+    #[arg(short = 'd', long, default_value = DEFAULT_INSTALLATION_ROOT)]
     pub document_root: PathBuf,
+
+    #[arg(long, short = 'r')]
+    /// Root folder used by backup modules to put their data into.
+    pub backup_root: PathBuf,
 
     /// Nextcloud notification receiver account.
     #[arg(long, default_value = "admin")]
@@ -69,18 +73,13 @@ pub enum Backends {
 pub enum Action {
     /// Backup the Nextcloud config, database and data.
     Backup(BackupArgs),
+    /// Retain backups.
+    Retain,
 }
 
 #[derive(Debug, Args, Default, Clone)]
 /// Arguments to tune the backup of the Nextcloud instance.
 pub struct BackupArgs {
-    #[arg(long, short = 'r')]
-    /// Root folder used by backup modules to put their data into.
-    ///
-    /// For instance, this is used by the [Config](crate::backends::Config)
-    /// module to put the config backups.
-    pub backup_root: PathBuf,
-
     /// Update nextcloud apps after backup.
     #[arg(long)]
     pub update: bool,

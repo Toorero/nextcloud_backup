@@ -1,19 +1,19 @@
 use std::{
     collections::HashMap,
     hash::Hash,
-    io,
     ops::{Deref, DerefMut},
     path::PathBuf,
     process::Command,
 };
 
 use chrono::NaiveDateTime;
-use derive_more::{Display, Error};
+
+use crate::backends::snapper::SnapperConfigError;
 
 use super::{SnapperCleanupAlgorithm, SnapperConfig};
 
 /// A snapshot created by snapper.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Snapshot {
     config: SnapperConfig,
     id: u64,
@@ -138,9 +138,61 @@ impl Snapshot {
         self.update();
     }
 
-    /// Returns a list of the user data saved in the [Snapshot].
-    pub fn user_data<'a>(&'a mut self) -> UserData<'a> {
+    /// Returns a map of the user data saved in the [Snapshot].
+    pub fn user_data(&self) -> &HashMap<String, String> {
+        &self.user_data
+    }
+
+    /// Returns a mutable map of the user data saved in the [Snapshot].
+    pub fn user_data_mut<'a>(&'a mut self) -> UserData<'a> {
         UserData { inner: self }
+    }
+
+    pub fn delete(self) -> Result<(), SnapperConfigError> {
+        self.delete_maybe_dry_run(false)
+    }
+    pub fn delete_dry_run(self) -> Result<(), SnapperConfigError> {
+        self.delete_maybe_dry_run(true)
+    }
+
+    fn delete_maybe_dry_run(self, dry_run: bool) -> Result<(), SnapperConfigError> {
+        let mut snapper_command = Command::new("snapper");
+        snapper_command
+            .arg("-c")
+            .arg(&self.config.config_id)
+            .arg("delete")
+            .arg(format!("{}", self.id));
+
+        log::trace!(
+            target: "backends::snapper::config",
+            "Running: snapper -c {} remove {}",
+            self.id,
+            self.config.config_id,
+        );
+        if dry_run {
+            return Ok(());
+        }
+
+        let snapper_output = snapper_command
+            .output()
+            .map_err(SnapperConfigError::SnapperNotRun)?;
+        let stderr = String::from_utf8_lossy(&snapper_output.stderr);
+        if !snapper_output.status.success() {
+            return Err(SnapperConfigError::SnapperCommandFailed {
+                command: Box::new(snapper_command),
+                error: stderr.into(),
+            });
+        }
+        if !stderr.is_empty() {
+            log::warn!(target: "backend::snapper", "{stderr}" );
+        }
+
+        let stderr = String::from_utf8_lossy(&snapper_output.stderr);
+
+        if !stderr.is_empty() {
+            log::warn!(target: "backend::snapper", "{stderr}" );
+        }
+        Ok(())
     }
 }
 
@@ -166,27 +218,4 @@ impl<'a> Drop for UserData<'a> {
     fn drop(&mut self) {
         self.inner.update()
     }
-}
-
-#[derive(Debug, Display, Error)]
-/// Errors on syncing a [Snapshot].
-pub enum SyncSnapshotError {
-    /// `btrfs send` failed on syncing.
-    #[display("btrfs-send command failed: {_0}")]
-    BtrfSendFailed(io::Error),
-    #[display("btrfs-receive command failed: {_0}")]
-    /// `btrfs receive` failed on syncing.
-    BtrfRecvFailed(io::Error),
-    /// Couldn't pipe `btrfs send` into `btrfs receive`.
-    #[display("pipe between btrfs-send and btrfs-receive failed: {_0}")]
-    PipeFailed(io::Error),
-    /// Sync destination not found.
-    #[display("Sync destination wasn't found: {_0:#?}")]
-    DestinationNotFound(#[error(ignore)] PathBuf),
-    /// Anchor snapshot wasn't found.
-    ///
-    /// For [incremental syncing](Snapshot::sync_incrementally) it is required
-    /// that the anchor was already synced.
-    #[display("Anchor snapshot isn't synced: {_0:?}")]
-    AnchorNotSynced(#[error(ignore)] Snapshot),
 }

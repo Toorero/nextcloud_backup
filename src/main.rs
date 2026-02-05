@@ -10,10 +10,6 @@ use nc_backup_lib::nextcloud::Nextcloud;
 fn main() {
     let cli = Cli::parse();
     let enabled_backends: HashSet<_> = cli.enabled_backends.into_iter().collect();
-    let Action::Backup(BackupArgs {
-        backup_root,
-        update,
-    }) = cli.action;
 
     // init logger
     let mut env_logger = env_logger::builder();
@@ -74,19 +70,39 @@ fn main() {
     let snapper = enabled_backends.get(&Backends::Snapper).map(|_| {
         let nextcloud = nextcloud.clone();
         let backend_snapper = backends_config.snapper;
-        thread::spawn(move || backend_snapper.backup(&nextcloud, dry_run))
+
+        match cli.action {
+            Action::Backup(..) => {
+                thread::spawn(move || backend_snapper.backup(&nextcloud, dry_run))
+            }
+            Action::Retain => thread::spawn(move || {
+                backend_snapper.retention(&nextcloud, &backends_config.retention, dry_run)
+            }),
+        }
     });
 
     let config = enabled_backends.get(&Backends::Config).map(|_| {
         let nextcloud = nextcloud.clone();
-        let backend_config = Config::with_config(&backup_root, backends_config.config);
-        thread::spawn(move || backend_config.backup(&nextcloud, dry_run))
+        let backend_config = Config::new(&cli.backup_root);
+        match cli.action {
+            Action::Backup(..) => thread::spawn(move || backend_config.backup(&nextcloud, dry_run)),
+            Action::Retain => thread::spawn(move || {
+                backend_config.retention(&nextcloud, &backends_config.retention, dry_run)
+            }),
+        }
     });
 
     let mariadb = enabled_backends.get(&Backends::MariaDb).map(|_| {
         let nextcloud = nextcloud.clone();
-        let backend_mariadb = MariaDb::with_config(&backup_root, backends_config.mariadb);
-        thread::spawn(move || backend_mariadb.backup(&nextcloud, dry_run))
+        let backend_mariadb = MariaDb::new(&cli.backup_root);
+        match cli.action {
+            Action::Backup(..) => {
+                thread::spawn(move || backend_mariadb.backup(&nextcloud, dry_run))
+            }
+            Action::Retain => thread::spawn(move || {
+                backend_mariadb.retention(&nextcloud, &backends_config.retention, dry_run)
+            }),
+        }
     });
 
     // wait for completion of modules
@@ -94,25 +110,25 @@ fn main() {
     if let Some(snapper) = snapper {
         let snapper_res = snapper.join().expect("no panic in backend snapper");
         if let Err(e) = snapper_res {
-            log::error!(target: "backend::snapper", "Backup of Nextcloud data using Snapper resulted in a fatal error: {e}");
+            log::error!(target: "backend::snapper", "Fatal error: {e}");
         }
     }
 
     if let Some(config) = config {
         let config_res = config.join().expect("no panic in backend config");
         if let Err(e) = config_res {
-            log::error!(target: "backend::config", "Backup of Nextcloud config resulted in a fatal error: {e}");
+            log::error!(target: "backend::config", "Fatal error: {e}");
         }
     }
 
     if let Some(mariadb) = mariadb {
         let mariadb_res = mariadb.join().expect("no panic in backend mariadb");
         if let Err(e) = mariadb_res {
-            log::error!(target: "backend::mariadb", "Backup of Nextcloud database resulted in a fatal error: {e}");
+            log::error!(target: "backend::mariadb", "Fatal error: {e}");
         }
     }
 
-    if update {
+    if let Action::Backup(BackupArgs { update: true, .. }) = cli.action {
         if let Err(e) = nextcloud.occ().update_apps(dry_run) {
             log::error!(target: "apps", "Updating the Nextcloud apps failed: {e}")
         }

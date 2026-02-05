@@ -9,6 +9,8 @@ use serde_json::Value;
 use super::snapshot::Snapshot;
 use super::SnapperCleanupAlgorithm;
 
+pub(super) const SNAPPER_USERDATA_TAG: &str = "nc_backup";
+
 #[derive(Debug, Clone)]
 /// A configuration of snapper.
 pub struct SnapperConfig {
@@ -270,6 +272,22 @@ impl SnapperConfig {
     ///
     /// If no [SnapperCleanupAlgorithm] is provided the snapshot must be manually deleted later.
     pub fn create_snapshot(&self, cleanup: Option<SnapperCleanupAlgorithm>) -> Result<Snapshot> {
+        Ok(self
+            .create_snapshot_maybe_dry_run(cleanup, false)?
+            .expect("non dry run should create snapshot on success"))
+    }
+
+    pub fn create_snapshot_dry_run(&self, cleanup: Option<SnapperCleanupAlgorithm>) -> Result<()> {
+        let res = self.create_snapshot_maybe_dry_run(cleanup, true)?;
+        assert_eq!(res, None, "dry run should not create snapshot on success");
+        Ok(())
+    }
+
+    pub fn create_snapshot_maybe_dry_run(
+        &self,
+        cleanup: Option<SnapperCleanupAlgorithm>,
+        dry_run: bool,
+    ) -> Result<Option<Snapshot>> {
         log::info!(target: "backends::snapper::config", "Create snapshot: {}", self.config_id);
 
         let mut snapper_command = Command::new("snapper");
@@ -278,6 +296,8 @@ impl SnapperConfig {
             .arg(&self.config_id)
             .arg("create")
             .arg("-p") // echo snapshot id
+            .arg("--userdata")
+            .arg(format!("{SNAPPER_USERDATA_TAG}=true"))
             .arg("--description")
             .arg("Full Nextcloud Backup");
 
@@ -287,15 +307,18 @@ impl SnapperConfig {
 
             log::trace!(
                 target: "backends::snapper::config",
-                "Running: snapper -c {} create -p  --description 'Full Nextcloud Backup' -c {algorithm}",
+                "Running: snapper -c {} create -p  --userdata {SNAPPER_USERDATA_TAG}=true --description 'Full Nextcloud Backup' -c {algorithm}",
                 self.config_id,
             );
         } else {
             log::trace!(
                 target: "backends::snapper::config",
-                "Running: snapper -c {} create -p --description 'Full Nextcloud Backup'",
+                "Running: snapper -c {} create -p --userdata {SNAPPER_USERDATA_TAG}=true --description 'Full Nextcloud Backup'",
                 self.config_id,
             );
+        }
+        if dry_run {
+            return Ok(None);
         }
 
         let snapper_output = snapper_command
@@ -323,10 +346,11 @@ impl SnapperConfig {
             .trim()
             .parse()
             .expect("snapper should output valid snapshot id");
-        log::debug!(target: "backends::snapper::config", "Created snapshot: {id}");
+        log::info!(target: "backends::snapper::config", "Created snapshot: {id}");
 
-        Ok(self
-            .snapshot(id)?
-            .expect("just created snapshot should exist"))
+        Ok(Some(
+            self.snapshot(id)?
+                .expect("just created snapshot should exist"),
+        ))
     }
 }
