@@ -1,0 +1,31 @@
+[Unit]
+Description=Nextcloud Backup and Retention
+
+[Service]
+Type=oneshot
+Environment=NEXTCLOUD_PHP_CONFIG=/etc/webapps/nextcloud/php.ini RUST_LOG=debug HOME=/home/nextcloud
+ExecStart=nc_backup -r %f -d /usr/share/webapps/nextcloud backup 
+ExecStart=nc_backup -r %f -d /usr/share/webapps/nextcloud retain
+
+User=nextcloud
+Group=nextcloud
+
+StandardOutput=append:%f/backup.log
+StandardError=inherit
+
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+CPUSchedulingPriority=0
+OOMScoreAdjust=500
+Nice=10
+
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=true
+NoNewPrivileges=true
+BindReadOnlyPaths=/home/nextcloud/.my.cnf
+ReadWritePaths=/run/mysqld/
+ReadOnlyPaths=/usr/share/webapps/nextcloud
+ReadWritePaths=/usr/share/webapps/nextcloud/config
+ReadWritePaths=/nextcloud
+ReadWritePaths=%f

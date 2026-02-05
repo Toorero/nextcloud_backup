@@ -1,9 +1,10 @@
 [Unit]
-Description=Make a Nextcloud backup every day at 2:30 AM
+Description=Daily Nextcloud Backup and Retention
 
 [Timer]
 OnCalendar=*-*-* 02:30:00
 Persistent=true
+RandomizedDelaySec=30m
 
 [Install]
 WantedBy=timers.target
