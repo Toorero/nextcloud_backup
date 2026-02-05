@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::process::ExitCode;
 use std::thread;
 
 use nc_backup_lib::backends::{BackendsConfig, Backup, Config, MariaDb};
@@ -7,7 +8,7 @@ use nc_backup_lib::cli::{Action, Backends, BackupArgs, Cli};
 use clap::Parser;
 use nc_backup_lib::nextcloud::Nextcloud;
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     let enabled_backends: HashSet<_> = cli.enabled_backends.into_iter().collect();
 
@@ -22,7 +23,7 @@ fn main() {
         Ok(config_str) => match toml::from_slice(&config_str) {
             Err(e) => {
                 log::error!("Reading the config file failed: {e}");
-                return;
+                return ExitCode::from(255);
             }
             Ok(cfg) => cfg,
         },
@@ -45,7 +46,7 @@ fn main() {
                 default_config
             } else {
                 log::error!("Reading the config file failed: {e}");
-                return;
+                return ExitCode::from(255);
             }
         }
     };
@@ -106,11 +107,13 @@ fn main() {
     });
 
     // wait for completion of modules
+    let mut exit_code = 0;
 
     if let Some(snapper) = snapper {
         let snapper_res = snapper.join().expect("no panic in backend snapper");
         if let Err(e) = snapper_res {
             log::error!(target: "backend::snapper", "Fatal error: {e}");
+            exit_code += 1 << 1;
         }
     }
 
@@ -118,6 +121,7 @@ fn main() {
         let config_res = config.join().expect("no panic in backend config");
         if let Err(e) = config_res {
             log::error!(target: "backend::config", "Fatal error: {e}");
+            exit_code += 1 << 2;
         }
     }
 
@@ -125,12 +129,14 @@ fn main() {
         let mariadb_res = mariadb.join().expect("no panic in backend mariadb");
         if let Err(e) = mariadb_res {
             log::error!(target: "backend::mariadb", "Fatal error: {e}");
+            exit_code += 1 << 3;
         }
     }
 
     if let Action::Backup(BackupArgs { update: true, .. }) = cli.action {
         if let Err(e) = nextcloud.occ().update_apps(dry_run) {
-            log::error!(target: "apps", "Updating the Nextcloud apps failed: {e}")
+            log::error!(target: "apps", "Updating the Nextcloud apps failed: {e}");
+            exit_code += 1;
         }
     }
 
@@ -138,4 +144,9 @@ fn main() {
         .occ()
         .disable_maintenance()
         .expect("maintenance should be disableable");
+
+    if exit_code != 0 {
+        return ExitCode::from(exit_code);
+    }
+    ExitCode::SUCCESS
 }
