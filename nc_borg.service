@@ -1,0 +1,15 @@
+[Unit]
+Description=Nextcloud Borg Backup
+
+[Service]
+Type=oneshot
+Environment=BORG_PASSPHRASE_FD="%d/borg_passphrase"
+ExecStart=nc_borg
+
+PrivateMounts=true
+
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+CPUSchedulingPriority=0
+OOMScoreAdjust=500
+Nice=10

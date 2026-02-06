@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+if [[ "$#" -gt 2 || (-v $1 && ($1 == "--help" || $1 == "-h")) ]]; then
+    echo "Usage: $0 [SNAP_ID] [YYYY-MM-DD]"
+    exit 1
+fi
+set -u
+
+: ${BORG_BACKUP_DIR:=/mnt/borg_bk}              # temporary stable mountpoint for backup
+: ${SNAPPER_NEXTCLOUD:=nextcloud}               # snapper nextcloud config
+: ${NEXTCLOUD_BACKUP_ROOT:=/nextcloud/backup}   # nc_backup backup root
+
+snap_id=${1:-$(snapper --json -c "${SNAPPER_NEXTCLOUD}" list | jq '[ .[][] | select(.userdata.nc_backup == "true") | .number ] | last')}
+snap_meta=$(snapper --json -c "${SNAPPER_NEXTCLOUD}" list | jq ".[][] | select(.number == ${snap_id})")
+date=${2:-$(jq -r '.date | strptime("%Y-%m-%d") | strftime("%Y-%m-%d")' <(echo $snap_meta))}
+subvol=$(jq -r '.subvolume' <(echo "${snap_meta}"))
+
+
+# create bind mount-point for stable snapshot path
+# this is important since the borg cache _always_ uses absolut paths for caches
+[[ ! -d "${BORG_BACKUP_DIR}" ]] \
+    || [ -z "$(ls -A "${BORG_BACKUP_DIR}")" ] \
+    || (echo "${BORG_BACKUP_DIR} not empty or can't be created" >&2; exit 1)
+
+CLEANUP=0
+cleanup() {
+    # guard against reentrance
+    if (( CLEANUP ))
+    then
+        return
+    fi
+    CLEANUP=1
+
+    popd
+    #snapper -c "${SNAPPER_NEXTCLOUD}" modify --cleanup-algorithm "timeline" $snap_id
+    umount --lazy "${BORG_BACKUP_DIR}"
+}
+
+mount --bind --mkdir "${subvol}/.snapshots/${snap_id}/snapshot" "${BORG_BACKUP_DIR}"
+pushd "${BORG_BACKUP_DIR}"
+trap cleanup EXIT INT TERM ERR
+
+#snapper -c "${SNAPPER_NEXTCLOUD}" modify --cleanup-algorithm "" $snap_id
+
+# borg create is run as normal rootless user
+
+export USER=nextcloud
+export HOME=/home/nextcloud
+export LOGNAME=nextcloud
+if [[ -v BORG_PASSPHRASE_FD ]] 
+then
+    # ensure BORG_PASSPHRASE_FD is accessible to borg even though it might
+    # only be accessible to root
+    cat "$BORG_PASSPHRASE_FD" | setpriv --reuid=nextcloud --regid=nextcloud --clear-groups \
+        borg create \
+        --stats --compression lz4 --files-cache ctime,size \
+        --exclude 'appdata_*/preview/*' --exclude 'updater-*/backups/*' \
+        ::"${snap_id}-${date}" \
+        . \
+        "${NEXTCLOUD_BACKUP_ROOT}/db/database-${date}T"*.sql.gz \
+        "${NEXTCLOUD_BACKUP_ROOT}/config/config-${date}T"*.php.gz
+else
+    setpriv --reuid=nextcloud --regid=nextcloud --clear-groups \
+        borg create \
+        --stats --compression lz4 --files-cache ctime,size \
+        --exclude 'appdata_*/preview/*' --exclude 'updater-*/backups/*' \
+        ::"${snap_id}-${date}" \
+        . \
+        "${NEXTCLOUD_BACKUP_ROOT}/db/database-${date}T"*.sql.gz \
+        "${NEXTCLOUD_BACKUP_ROOT}/config/config-${date}T"*.php.gz
+fi
