@@ -46,7 +46,7 @@ trap cleanup EXIT INT TERM ERR
 # borg create is run as normal rootless user
 
 export USER=nextcloud
-export HOME=/home/nextcloud
+export HOME=~nextcloud
 export LOGNAME=nextcloud
 if [[ -v BORG_PASSPHRASE_FD ]] 
 then
